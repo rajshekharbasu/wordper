@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>WordPerfect</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+</head>
+<body class="viewport-locked">
+
+    <!-- OVERLAY 1: Boot Screen & Controls -->
+    <div id="screen-boot" class="overlay-screen product-tile-parchment active">
+        <h1 class="hero-display">WordPerfect</h1>
+        <p class="lead text-muted" id="boot-status" style="margin-top: 16px;">Loading dictionary...</p>
+        
+        <div id="multiplayer-controls" class="hidden" style="margin-top: 48px; display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 340px;">
+            <input type="text" id="input-player-name" class="pill-input body" placeholder="Enter your name..." style="text-transform: none; text-align: center;">
+            
+            <!-- Host Setup Cluster -->
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 0 8px;">
+                    <input type="range" id="input-rounds" class="slider" min="1" max="10" value="3">
+                    <span id="rounds-display" class="caption-strong text-muted" style="text-align: center; margin-top: 8px;">3 Rounds</span>
+                </div>
+                <button id="btn-create-room" class="button-store-hero" style="flex: 1; padding: 14px;">Create Room</button>
+            </div>
+            
+            <div style="width: 100%; height: 1px; background-color: var(--hairline); margin: 8px 0;"></div>
+            
+            <!-- Guest Join Cluster -->
+            <div style="display: flex; gap: 8px;">
+                <input type="text" id="input-room-code" class="pill-input body" placeholder="CODE" maxlength="4" style="text-transform: uppercase; text-align: center; flex: 2;">
+                <button id="btn-join-room" class="button-primary" style="flex: 1;">Join</button>
+            </div>
+            <p class="caption text-danger hidden" id="join-error-msg" style="text-align: center; margin-top: 8px;"></p>
+        </div>
+    </div>
+
+    <!-- OVERLAY 2: Lobby Screen -->
+    <div id="screen-lobby" class="overlay-screen product-tile-parchment">
+        <p class="caption-strong text-muted">ROOM CODE</p>
+        <h1 class="hero-display" id="display-room-code" style="letter-spacing: 4px; margin-bottom: 32px;">----</h1>
+        
+        <p class="body-strong" id="lobby-round-text" style="margin-bottom: 24px;">Round 1 of X</p>
+        
+        <div class="utility-card" style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 32px;">
+            <p class="caption-strong text-muted" style="margin-bottom: 16px; text-align: center;">PLAYERS</p>
+            <ul id="lobby-player-list" class="body" style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px;"></ul>
+        </div>
+        
+        <button id="btn-ready-up" class="button-primary" style="padding: 14px 48px; font-size: 18px;">Ready Up</button>
+    </div>
+
+    <!-- OVERLAY 3: The 5-Second Countdown -->
+    <div id="screen-countdown" class="overlay-screen product-tile-dark">
+        <p class="hero-display" id="countdown-timer" style="font-size: 140px; font-variant-numeric: tabular-nums;">5</p>
+    </div>
+
+    <!-- OVERLAY 4: Penalty Modal -->
+    <div id="penalty-modal" class="overlay-screen product-tile-dark" style="z-index: 200;">
+        <svg style="width: 56px; height: 56px; color: var(--danger); margin-bottom: 24px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+        <h1 class="display-md">Connection Unstable.</h1>
+        <p class="lead text-muted" style="margin-top: 8px;">Tab shifting is not permitted.</p>
+        <p class="body-strong" id="penalty-status" style="margin-top: 32px; color: var(--danger);">Waiting for you to return...</p>
+        <p class="hero-display hidden" id="penalty-timer" style="margin-top: 16px; font-size: 120px; color: var(--danger); font-variant-numeric: tabular-nums;">5</p>
+    </div>
+
+    <!-- OVERLAY 5: Post-Round Results -->
+    <div id="screen-results" class="overlay-screen product-tile-parchment" style="z-index: 150;">
+        <h1 class="display-lg" id="results-title">Round Results</h1>
+        <div class="utility-card" style="width: 100%; max-width: 500px; padding: 24px; margin: 32px 0; max-height: 50vh; overflow-y: auto;">
+            <ul id="results-list" class="body" style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 16px;"></ul>
+        </div>
+        <button id="btn-next-round" class="button-store-hero">View Standings</button>
+    </div>
+
+    <!-- OVERLAY 5.5: Current Standings -->
+    <div id="screen-standings" class="overlay-screen product-tile-dark" style="z-index: 155;">
+        <h1 class="display-lg" style="margin-bottom: 48px;">Current Standings</h1>
+        <div id="standings-list" style="display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 450px; margin-bottom: 48px;">
+            <!-- Rendered by JS -->
+        </div>
+        <button id="btn-standings-ready" class="button-primary" style="padding: 14px 48px; font-size: 18px;">Ready for Next Round</button>
+        <button id="btn-standings-to-lobby" type="button" class="body-strong" style="margin-top: 20px; padding: 12px 24px; background: transparent; color: rgba(255,255,255,0.65); border: 1px solid rgba(255,255,255,0.25); border-radius: 999px; cursor: pointer;">Back to Lobby</button>
+    </div>
+
+    <!-- OVERLAY 6: Game Over / Winner Podium -->
+    <div id="screen-winner" class="overlay-screen product-tile-dark" style="z-index: 160;">
+        <h1 class="hero-display" style="margin-bottom: 48px;">Game Over</h1>
+        <div id="winner-list" style="display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 400px; margin-bottom: 48px;">
+            <!-- Podium injected here -->
+        </div>
+        <button id="btn-play-again" class="button-primary hidden" style="padding: 14px 48px; font-size: 18px;">Play Again</button>
+        <p id="guest-waiting-msg" class="body-muted hidden">Waiting for host to restart...</p>
+    </div>
+
+    <!-- MAIN GAME CHASSIS -->
+    <div id="screen-game" class="game-container">
+        <nav class="global-nav">
+            <div class="nav-cluster-left"><span class="nav-link">WordPerfect</span></div>
+            <div class="nav-cluster-center"><span class="nav-link" id="nav-room-display">Room: ----</span></div>
+            <div class="nav-cluster-right"><span class="nav-link" id="nav-round-display">Round 1</span></div>
+        </nav>
+
+        <main class="game-chassis">
+            <section class="grid-region">
+                <div id="board" class="grid-4x4">
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                </div>
+            </section>
+
+            <section class="workspace-region">
+                <header class="workspace-header">
+                    <div class="timer-block">
+                        <span id="round-indicator" class="caption-strong">Round 1</span>
+                        <h2 id="master-timer" class="display-lg" style="font-variant-numeric: tabular-nums;">01:00</h2>
+                    </div>
+                </header>
+
+                <div class="draft-container utility-card">
+                    <ul id="drafted-words" class="word-list body"></ul>
+                </div>
+
+                <form id="word-form" class="input-cluster">
+                    <div class="input-wrapper">
+                        <input type="text" id="word-input" class="pill-input body" placeholder="Draft word..." autocomplete="off">
+                        <button type="submit" id="send-word-btn" class="send-btn" disabled>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                        </button>
+                    </div>
+                </form>
+            </section>
+        </main>
+
+        <div class="floating-sticky-bar">
+            <div class="bar-content">
+                <div class="score-cluster">
+                    <span class="body-strong" id="total-score-display">Total: 0 pts</span>
+                    <span class="caption text-muted" id="round-score-display">Drafted: 0 words</span>
+                </div>
+                <button id="submit-round" class="button-primary">Lock In Early</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- SUPABASE CLIENT LIBRARY -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="script.js"></script>
+</body>
+</html>
