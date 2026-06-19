@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>WordPerfect</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+
+</head>
+
+<body class="viewport-locked">
+
+    <!-- OVERLAY 1: Boot Screen & Controls -->
+    <div id="screen-boot" class="overlay-screen product-tile-parchment active">
+        <h1 class="hero-display">WordPerfect</h1>
+        <p class="lead text-muted" id="boot-status" style="margin-top: 16px;">Loading dictionary...</p>
+
+        <div id="multiplayer-controls" class="hidden"
+            style="margin-top: 48px; display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 340px;">
+            <input type="text" id="input-player-name" class="pill-input body" placeholder="Enter your name..."
+                style="text-transform: none; text-align: center;">
+
+            <!-- Host Actions -->
+            <div style="display: flex; gap: 16px; justify-content: center; align-items: center; margin-bottom: 4px;">
+                <button id="btn-create-room" class="button-store-hero" style="width: 44px; height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 50%; flex-shrink: 0;" title="Create Room">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 20px; height: 20px;">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                </button>
+                <button id="btnOpenTutorial" class="button-primary" style="width: 44px; height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 50%; flex-shrink: 0;" title="How to Play">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 20px; height: 20px;">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                </button>
+            </div>
+
+            <div style="width: 100%; height: 1px; background-color: var(--hairline); margin: 4px 0;"></div>
+
+            <!-- Guest Join Cluster -->
+            <div style="display: flex; gap: 8px;">
+                <input type="text" id="input-room-code" class="pill-input body" placeholder="CODE" maxlength="4"
+                    style="text-transform: uppercase; text-align: center; flex: 2;">
+                <button id="btn-join-room" class="button-primary" style="flex: 1;">Join</button>
+            </div>
+
+            <p class="caption text-danger hidden" id="join-error-msg" style="text-align: center; margin-top: 8px;"></p>
+        </div>
+    </div>
+
+    <!-- OVERLAY 2: Lobby Screen -->
+    <div id="screen-lobby" class="overlay-screen product-tile-parchment">
+        <p class="caption-strong text-muted">ROOM CODE</p>
+        <h1 class="hero-display" id="display-room-code" style="letter-spacing: 4px; margin-bottom: 8px;">----</h1>
+        <button id="btn-copy-link" class="button-secondary" type="button" style="width: auto; border-radius: 999px; padding: 8px 16px; font-size: 13px; margin-bottom: 24px; display: flex; align-items: center; gap: 8px;" title="Copy invite link">
+            <div class="icon-wrapper" style="position: relative; width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; will-change: filter, opacity; transition: filter 150ms ease-out, opacity 150ms ease-out;">
+                <svg id="copy-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px; position: absolute; left: 0; top: 0; opacity: 1; transition: opacity 150ms ease-out;">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg id="check-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px; position: absolute; left: 0; top: 0; opacity: 0; transition: opacity 150ms ease-out;">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+            </div>
+            <span>Copy Invite Link</span>
+        </button>
+
+        <p class="body-strong" id="lobby-round-text" style="margin-bottom: 24px;">Round 1 of X</p>
+
+        <!-- Lobby Settings Card -->
+        <div class="utility-card" id="lobby-settings-card" style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 24px; display: flex; flex-direction: column; gap: 24px;">
+            <p class="caption-strong text-muted" style="text-align: center; margin-bottom: 0px;">GAME SETTINGS</p>
+            
+            <!-- Rounds Customiser -->
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span class="body-strong">Rounds</span>
+                    <span id="lobby-rounds-display" class="caption-strong text-muted">3 Rounds</span>
+                </div>
+                <input type="range" id="lobby-input-rounds" class="slider" min="1" max="10" value="3">
+            </div>
+
+            <!-- Seconds Customiser -->
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span class="body-strong">Time per Round</span>
+                    <span id="lobby-time-display" class="caption-strong text-muted">60s</span>
+                </div>
+                <input type="range" id="lobby-input-time" class="slider" min="15" max="180" step="5" value="60">
+            </div>
+        </div>
+
+        <div class="utility-card" style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 32px;">
+            <p class="caption-strong text-muted" style="margin-bottom: 16px; text-align: center;">PLAYERS</p>
+            <ul id="lobby-player-list" class="body"
+                style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px;"></ul>
+        </div>
+
+        <button id="btn-ready-up" class="button-primary" style="padding: 14px 48px; font-size: 18px;">Ready Up</button>
+    </div>
+    <!-- TUTORIAL SCREEN -->
+    <div id="screenTutorial" class="overlay-screen product-tile-parchment">
+        <div class="tutorial-container">
+            <h1 class="tutorial-header">How to Play</h1>
+
+            <div class="tutorial-steps">
+                <div class="step hidden-step">
+                    <h3>The Clock is Ticking</h3>
+                    <p>You have exactly 60 seconds to find as many words as possible on the board.</p>
+                </div>
+
+                <div class="step hidden-step">
+                    <h3>The Golden Rules</h3>
+                    <p>Words must be at least <strong>4 letters</strong> long. No basic plurals allowed.</p>
+                </div>
+
+                <div class="step hidden-step">
+                    <h3>The Catch</h3>
+                    <p>If you submit the exact same word as another player, the word is <strong>CANCELLED</strong> for
+                        both of you and earns zero points!</p>
+                </div>
+
+                <div class="step hidden-step">
+                    <h3>Winning</h3>
+                    <p>Find the most unique, high-value words over the set number of rounds to take the crown.</p>
+                </div>
+            </div>
+
+            <button id="btnCloseTutorial" class="button-primary hidden-step">Got it. Let's Play!</button>
+        </div>
+    </div>
+
+    <!-- OVERLAY 3: The 5-Second Countdown -->
+    <div id="screen-countdown" class="overlay-screen product-tile-dark">
+        <p class="hero-display" id="countdown-timer" style="font-size: 140px; font-variant-numeric: tabular-nums;">5</p>
+    </div>
+
+    <!-- OVERLAY 4: Penalty Modal -->
+    <div id="penalty-modal" class="overlay-screen product-tile-dark" style="z-index: 200;">
+        <svg style="width: 56px; height: 56px; color: var(--danger); margin-bottom: 24px;" viewBox="0 0 24 24"
+            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+        <h1 class="display-md">Connection Unstable.</h1>
+        <p class="lead text-muted" style="margin-top: 8px;">Tab shifting is not permitted.</p>
+        <p class="body-strong" id="penalty-status" style="margin-top: 32px; color: var(--danger);">Waiting for you to
+            return...</p>
+        <p class="hero-display hidden" id="penalty-timer"
+            style="margin-top: 16px; font-size: 120px; color: var(--danger); font-variant-numeric: tabular-nums;">5</p>
+    </div>
+
+    <!-- OVERLAY 5: Post-Round Results -->
+    <div id="screen-results" class="overlay-screen product-tile-parchment" style="z-index: 150;">
+        <h1 class="display-lg" id="results-title">Round Results</h1>
+        <div class="utility-card"
+            style="width: 100%; max-width: 500px; padding: 24px; margin: 32px 0; max-height: 50vh; overflow-y: auto;">
+            <ul id="results-list" class="body"
+                style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 16px;"></ul>
+        </div>
+        <button id="btn-next-round" class="button-store-hero">View Standings</button>
+    </div>
+
+    <!-- OVERLAY 5.5: Current Standings -->
+    <div id="screen-standings" class="overlay-screen product-tile-dark" style="z-index: 155;">
+        <h1 class="display-lg" style="margin-bottom: 48px;">Current Standings</h1>
+        <div id="standings-list"
+            style="display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 450px; margin-bottom: 48px;">
+            <!-- Rendered by JS -->
+        </div>
+        <button id="btn-standings-ready" class="button-primary" style="padding: 14px 48px; font-size: 18px;">Ready for
+            Next Round</button>
+        <button id="btn-standings-view-words" type="button" class="body-strong"
+            style="margin-top: 20px; padding: 12px 24px; background: transparent; color: rgba(255,255,255,0.65); border: 1px solid rgba(255,255,255,0.25); border-radius: 999px; cursor: pointer;">View Words</button>
+    </div>
+
+    <!-- OVERLAY 6: Game Over / Winner Podium -->
+    <div id="screen-winner" class="overlay-screen product-tile-dark" style="z-index: 160;">
+        <h1 class="hero-display" style="margin-bottom: 48px;">Game Over</h1>
+        <div id="winner-list"
+            style="display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 400px; margin-bottom: 48px;">
+            <!-- Podium injected here -->
+        </div>
+        <button id="btn-play-again" class="button-primary hidden" style="padding: 14px 48px; font-size: 18px;">Play
+            Again</button>
+        <p id="guest-waiting-msg" class="body-muted hidden">Waiting for host to restart...</p>
+    </div>
+
+    <!-- MAIN GAME CHASSIS -->
+    <div id="screen-game" class="game-container">
+        <nav class="global-nav">
+            <div class="nav-cluster-left"><span class="nav-link">WordPerfect</span></div>
+            <div class="nav-cluster-center"><span class="nav-link" id="nav-room-display">Room: ----</span></div>
+            <div class="nav-cluster-right"><span class="nav-link" id="nav-round-display">Round 1</span></div>
+        </nav>
+
+        <main class="game-chassis">
+            <section class="grid-region">
+                <div id="board" class="grid-4x4">
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                    <button class="tile utility-card"></button><button class="tile utility-card"></button>
+                </div>
+            </section>
+
+            <section class="workspace-region">
+                <header class="workspace-header">
+                    <div class="timer-block">
+                        <span id="round-indicator" class="caption-strong">Round 1</span>
+                        <h2 id="master-timer" class="display-lg" style="font-variant-numeric: tabular-nums;">01:00</h2>
+                    </div>
+                    <button id="btn-shuffle" class="button-secondary" type="button" title="Shuffle Board" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="16 3 21 3 21 8"></polyline>
+                            <line x1="4" y1="20" x2="21" y2="3"></line>
+                            <polyline points="21 16 21 21 16 21"></polyline>
+                            <line x1="15" y1="15" x2="21" y2="21"></line>
+                            <line x1="4" y1="4" x2="9" y2="9"></line>
+                        </svg>
+                    </button>
+                </header>
+
+                <div class="draft-container utility-card">
+                    <canvas id="physics-canvas"></canvas>
+                    <ul id="drafted-words" class="word-list body hidden"></ul>
+                </div>
+
+                <form id="word-form" class="input-cluster">
+                    <div class="input-wrapper">
+                        <input type="text" id="word-input" class="pill-input body" placeholder="Draft word..."
+                            autocomplete="off">
+                        <button type="submit" id="send-word-btn" class="send-btn" disabled>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                                stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="12" y1="19" x2="12" y2="5"></line>
+                                <polyline points="5 12 12 5 19 12"></polyline>
+                            </svg>
+                        </button>
+                    </div>
+                </form>
+            </section>
+        </main>
+
+        <div class="floating-sticky-bar">
+            <div class="bar-content">
+                <div class="score-cluster">
+                    <span class="body-strong" id="total-score-display">Total: 0 pts</span>
+                    <span class="caption text-muted" id="round-score-display">Drafted: 0 words</span>
+                </div>
+                <button id="submit-round" class="button-primary">Lock In Early</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- SUPABASE CLIENT LIBRARY -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <script src="script.js"></script>
+</body>
+
+</html>
