@@ -1,3 +1,21 @@
+// --- THEME INITIALIZATION & TOGGLE ---
+(function() {
+    const savedTheme = localStorage.getItem('wordperfect_theme');
+    if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.body.classList.add('dark-theme');
+    }
+})();
+
+document.addEventListener('DOMContentLoaded', () => {
+    const themeToggleBtn = document.getElementById('theme-toggle');
+    if (themeToggleBtn) {
+        themeToggleBtn.addEventListener('click', () => {
+            const isDark = document.body.classList.toggle('dark-theme');
+            localStorage.setItem('wordperfect_theme', isDark ? 'dark' : 'light');
+        });
+    }
+});
+
 // --- NETWORK STATE (SUPABASE) ---
 const SUPABASE_URL = 'https://lnjcbqdcaikndbllyhkc.supabase.co'; // Keep your actual URL
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxuamNicWRjYWlrbmRibGx5aGtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3ODIyNjgsImV4cCI6MjA5MzM1ODI2OH0.zIt87ajVwBUEstCiQdHbrqUWRmEcQvrcRmY109bT_QE'; // Keep your actual Key
@@ -277,7 +295,6 @@ lobbyInputTime.addEventListener('change', async () => {
 // --- SUPABASE REALTIME LOGIC ---
 
 
-// --- SUPABASE REALTIME LOGIC ---
 async function syncMyState() {
     if (!roomChannel) return;
 
@@ -296,6 +313,7 @@ async function syncMyState() {
     if (isHost) {
         trackPayload.maxRounds = maxRounds;
         trackPayload.roundTime = secondsPerRound;
+        trackPayload.aiPlayers = myLocalAiPlayers;
     }
 
     await roomChannel.track(trackPayload);
@@ -325,19 +343,28 @@ async function joinRealtimeRoom(code, name, hostFlag) {
     });
 
     // 1. Presence Sync (Lobby Updates)
-    // 1. Presence Sync (Lobby Updates)
     const handlePresenceUpdate = () => {
         const state = roomChannel.presenceState();
 
         activePlayersList = [];
+        let aiPlayersToAppend = [];
         for (const id in state) {
             if (state[id] && state[id].length > 0) {
                 // FIX: Sort the history array by our timestamp so we always grab the newest state!
                 const playerStates = state[id];
                 playerStates.sort((a, b) => b.updatedAt - a.updatedAt);
-                activePlayersList.push(playerStates[0]);
+                const activeState = playerStates[0];
+                activePlayersList.push(activeState);
+                
+                // If this connected player is the host and has bots, save them
+                if (activeState.isHost && activeState.aiPlayers) {
+                    aiPlayersToAppend = activeState.aiPlayers;
+                }
             }
         }
+        
+        // Append bots to the players list
+        activePlayersList = [...activePlayersList, ...aiPlayersToAppend];
 
         // Guest synchronizes with the host's settings (maxRounds, secondsPerRound) in real-time
         const hostPlayer = activePlayersList.find(p => p.isHost);
@@ -364,6 +391,18 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                         syncMyState();
                     }
                 }
+            }
+        }
+
+        // Show/hide play with bot suggestion toast
+        const isSingleRealPlayer = activePlayersList.filter(p => !p.isAi).length === 1;
+        const hasAi = activePlayersList.some(p => p.isAi);
+        const aiToastEl = document.getElementById('ai-toast');
+        if (aiToastEl) {
+            if (isHost && isSingleRealPlayer && !hasAi && !isAiRejected) {
+                aiToastEl.classList.remove('hidden');
+            } else {
+                aiToastEl.classList.add('hidden');
             }
         }
 
@@ -471,8 +510,9 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             const data = response.playerId ? response : response.payload;
             hostSubmissions[data.playerId] = data.words;
 
-            // If we have received words from everyone in the room
-            if (Object.keys(hostSubmissions).length === activePlayersList.length) {
+            // If we have received words from everyone in the room (excluding bots)
+            const realPlayersCount = activePlayersList.filter(p => !p.isAi).length;
+            if (Object.keys(hostSubmissions).length === realPlayersCount) {
                 calculateScoresAndBroadcast();
             }
         });
@@ -619,8 +659,50 @@ async function startGameAsHost() {
     });
 }
 
+function getAllValidBoardWords() {
+    const validWords = [];
+    for (const word of dictionarySet) {
+        if (word.length >= 4 && !isPlural(word) && isWordInGrid(word)) {
+            validWords.push(word);
+        }
+    }
+    return validWords;
+}
+
 async function calculateScoresAndBroadcast() {
     let wordMap = {};
+
+    // Generate AI player submissions right here on the Host!
+    const allValidWords = getAllValidBoardWords();
+    const aiPlayers = activePlayersList.filter(p => p.isAi);
+    
+    aiPlayers.forEach(bot => {
+        let count = 0;
+        let minLen = 4;
+        let maxLen = 8;
+        
+        if (bot.difficulty === 'Easy') {
+            count = Math.floor(2 + Math.random() * 3); // 2 to 4 words
+            maxLen = 5;
+        } else if (bot.difficulty === 'Medium') {
+            count = Math.floor(5 + Math.random() * 3); // 5 to 7 words
+            maxLen = 7;
+        } else { // Hard
+            count = Math.floor(8 + Math.random() * 4); // 8 to 11 words
+            maxLen = 12;
+        }
+        
+        let pool = allValidWords.filter(w => w.length >= minLen && w.length <= maxLen);
+        if (pool.length === 0) pool = allValidWords; // Fallback
+        
+        const botWords = [];
+        const shuffled = [...pool].sort(() => 0.5 - Math.random());
+        for (let i = 0; i < Math.min(count, shuffled.length); i++) {
+            botWords.push(shuffled[i]);
+        }
+        
+        hostSubmissions[bot.id] = botWords;
+    });
 
     // Map words to authors
     for (let playerId in hostSubmissions) {
@@ -671,12 +753,100 @@ async function calculateScoresAndBroadcast() {
 }
 
 
+let myLocalAiPlayers = [];
+let isAiRejected = false;
+
+const soccerPlayers = [
+    "Messi", "Ronaldo", "Neymar", "Mbappe", "Haaland", 
+    "Salah", "DeBruyne", "Kane", "Lewandowski", "Modric", 
+    "Benzema", "Kroos", "Ronaldinho", "Zidane", "Pele", "Maradona"
+];
+
+function getRandomAiName() {
+    const currentNames = activePlayersList.map(p => p.name.toUpperCase());
+    const availablePlayers = soccerPlayers.filter(name => !currentNames.includes(name.toUpperCase()));
+    
+    const baseName = availablePlayers.length > 0 
+        ? availablePlayers[Math.floor(Math.random() * availablePlayers.length)]
+        : "Striker";
+        
+    return `${baseName}_${Math.floor(10 + Math.random() * 90)}`;
+}
+
+async function leaveRoomAndGoHome() {
+    console.log("Leaving room and cleaning up state...");
+    
+    if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
+
+    if (roomChannel) {
+        try {
+            await roomChannel.unsubscribe();
+        } catch (e) {
+            console.error("Error unsubscribing:", e);
+        }
+        roomChannel = null;
+    }
+
+    if (physicsEngine) {
+        Matter.World.clear(physicsWorld);
+        Matter.Engine.clear(physicsEngine);
+        physicsEngine = null;
+        physicsWorld = null;
+    }
+    if (physicsAnimId) {
+        cancelAnimationFrame(physicsAnimId);
+        physicsAnimId = null;
+    }
+    physicsWordBodies = [];
+
+    isPlaying = false;
+    currentRound = 1;
+    myTotalScore = 0;
+    myTotalWords = 0;
+    myLocalAiPlayers = [];
+    isAiRejected = false;
+    isReady = false;
+    isHost = false;
+
+    clearGameStateFromSession();
+    sessionStorage.removeItem('wordperfect_room');
+    sessionStorage.removeItem('wordperfect_name');
+    sessionStorage.removeItem('wordperfect_is_host');
+    sessionStorage.removeItem('wordperfect_total_score');
+    sessionStorage.removeItem('wordperfect_total_words');
+
+    resetReadyButtons();
+    totalScoreDisplay.textContent = `Total: 0 pts`;
+    roundScoreDisplay.textContent = `Drafted: 0 words`;
+    displayRoomCode.textContent = '----';
+    navRoomDisplay.textContent = 'Room: ----';
+    navRoundDisplay.textContent = 'Round 1';
+    roundIndicator.textContent = 'Round 1';
+
+    const overlays = [
+        screenLobby, screenCountdown, screenResults, 
+        screenStandings, screenWinner, screenTutorial, 
+        penaltyModal
+    ];
+    overlays.forEach(o => {
+        if (o) hideOverlay(o);
+    });
+
+    showOverlay(screenBoot);
+}
+
 // --- UI EVENT LISTENERS ---
 btnCreateRoom.addEventListener('click', async () => {
     myPlayerName = inputPlayerName.value.trim();
     maxRounds = 3; // Default starting rounds
     secondsPerRound = 60; // Default starting round duration
     if (myPlayerName.length < 2) return alert("Enter a valid name.");
+
+    myLocalAiPlayers = [];
+    isAiRejected = false;
 
     // Pre-initialize lobby setting displays for the Host
     lobbyInputRounds.value = maxRounds;
@@ -699,6 +869,8 @@ btnJoinRoom.addEventListener('click', async () => {
     if (myPlayerName.length < 2) return alert("Enter a valid name.");
     if (code.length !== 4) return alert("Room code must be 4 letters.");
 
+    myLocalAiPlayers = [];
+    isAiRejected = false;
     clearGameStateFromSession();
 
     await joinRealtimeRoom(code, myPlayerName, false);
@@ -844,18 +1016,60 @@ function renderLobbyPlayers(players) {
     lobbyPlayerList.innerHTML = '';
     players.forEach(p => {
         const li = document.createElement('li');
-        li.style.display = 'flex';
-        li.style.justifyContent = 'space-between';
-        li.style.alignItems = 'center';
+        li.className = `lobby-player-item ${p.isAi ? 'ai-player' : ''}`;
         
         const readyIndicator = p.isReady
             ? `<span class="ready-indicator ready" title="Ready"></span>`
             : `<span class="ready-indicator" title="Not Ready"></span>`;
             
         const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
-        li.innerHTML = `<span>${nameDisplay}</span> <span>${p.score} pts</span> <span style="display: flex; align-items: center; justify-content: flex-end; width: 30px;">${readyIndicator}</span>`;
+        
+        li.innerHTML = `
+            <div class="player-info-group">
+                <span class="player-name">${nameDisplay}</span>
+                ${p.isAi ? (isHost ? `
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <select class="ai-difficulty-select-pill" data-ai-id="${p.id}">
+                        <option value="Easy" ${p.difficulty === 'Easy' ? 'selected' : ''}>Easy</option>
+                        <option value="Medium" ${p.difficulty === 'Medium' ? 'selected' : ''}>Medium</option>
+                        <option value="Hard" ${p.difficulty === 'Hard' ? 'selected' : ''}>Hard</option>
+                    </select>
+                    <button class="btn-remove-ai-inline" data-ai-id="${p.id}" title="Remove Bot">×</button>
+                </div>
+                ` : `<span class="ai-badge">${p.difficulty}</span>`) : ''}
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span>${p.score} pts</span>
+                <span style="display: flex; align-items: center; justify-content: flex-end; width: 30px;">${readyIndicator}</span>
+            </div>
+        `;
         lobbyPlayerList.appendChild(li);
     });
+
+    if (isHost) {
+        const selects = lobbyPlayerList.querySelectorAll('.ai-difficulty-select-pill');
+        selects.forEach(select => {
+            select.addEventListener('change', async (e) => {
+                const aiId = e.target.getAttribute('data-ai-id');
+                const newDifficulty = e.target.value;
+                const ai = myLocalAiPlayers.find(bot => bot.id === aiId);
+                if (ai) {
+                    ai.difficulty = newDifficulty;
+                    await syncMyState();
+                }
+            });
+        });
+
+        const removeBtns = lobbyPlayerList.querySelectorAll('.btn-remove-ai-inline');
+        removeBtns.forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                const aiId = e.target.getAttribute('data-ai-id');
+                myLocalAiPlayers = myLocalAiPlayers.filter(bot => bot.id !== aiId);
+                await syncMyState();
+            });
+        });
+    }
 }
 
 function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? currentRound - 1 : 1) {
@@ -870,7 +1084,7 @@ function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? curren
         div.style.alignItems = 'stretch';
         div.style.cursor = 'pointer';
 
-        let rankLabel = rank === 1 ? '🥇 1st' : rank === 2 ? '🥈 2nd' : rank === 3 ? '🥉 3rd' : `${rank}th`;
+        let rankLabel = rank === 1 ? '1st' : rank === 2 ? '2nd' : rank === 3 ? '3rd' : `${rank}th`;
         const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
         const readyIndicator = p.isReady
             ? `<span class="ready-indicator ready" title="Ready"></span>`
@@ -948,7 +1162,7 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
         div.style.alignItems = 'stretch';
         div.style.cursor = 'pointer';
 
-        let rankLabel = rank === 1 ? '🥇 1st' : rank === 2 ? '🥈 2nd' : rank === 3 ? '🥉 3rd' : `${rank}th`;
+        let rankLabel = rank === 1 ? '1st' : rank === 2 ? '2nd' : rank === 3 ? '3rd' : `${rank}th`;
         const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
 
         const tWords = p.totalWords || 0;
@@ -1017,6 +1231,7 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
 
 // --- COUNTDOWN SEQUENCE ---
 function startCountdown() {
+    document.body.classList.add('counting-down');
     showOverlay(screenCountdown);
     let count = 5;
     countdownTimer.textContent = count;
@@ -1034,6 +1249,7 @@ function startCountdown() {
             countdownTimer.classList.add('animate-pop');
         } else {
             clearInterval(countInt);
+            document.body.classList.remove('counting-down');
             hideOverlay(screenCountdown);
             initRound();
         }
@@ -1431,17 +1647,19 @@ function drawPill(ctx, x, y, width, height, angle, text) {
     ctx.arc(width / 2 - radius, 0, radius, (3 * Math.PI) / 2, Math.PI / 2);
     ctx.closePath();
 
+    const isDark = document.body.classList.contains('dark-theme');
+
     // 1. Draw solid fill
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = isDark ? '#1e1e24' : '#ffffff';
     ctx.fill();
 
     // 2. Draw modern cobalt border (fits primary style token)
-    ctx.strokeStyle = 'rgba(0, 102, 204, 0.18)';
+    ctx.strokeStyle = isDark ? 'rgba(0, 102, 204, 0.4)' : 'rgba(0, 102, 204, 0.18)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // 3. Draw clean Inter text (dark ink styling)
-    ctx.fillStyle = '#1d1d1f';
+    // 3. Draw clean Inter text (dark/light styling)
+    ctx.fillStyle = isDark ? '#f5f5f7' : '#1d1d1f';
     ctx.font = '600 13px "SF Pro Text", "Inter", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1489,6 +1707,48 @@ function addWordToPhysics(word, staggerIndex = 0) {
 
     physicsWordBodies.push(body);
     Matter.World.add(physicsWorld, body);
+}
+
+// Bind Home Buttons
+const btnLobbyHome = document.getElementById('btn-lobby-home');
+const btnResultsHome = document.getElementById('btn-results-home');
+const btnStandingsHome = document.getElementById('btn-standings-home');
+const btnWinnerHome = document.getElementById('btn-winner-home');
+const navHomeBtn = document.getElementById('nav-home-btn');
+
+if (btnLobbyHome) btnLobbyHome.addEventListener('click', leaveRoomAndGoHome);
+if (btnResultsHome) btnResultsHome.addEventListener('click', leaveRoomAndGoHome);
+if (btnStandingsHome) btnStandingsHome.addEventListener('click', leaveRoomAndGoHome);
+if (btnWinnerHome) btnWinnerHome.addEventListener('click', leaveRoomAndGoHome);
+if (navHomeBtn) navHomeBtn.addEventListener('click', leaveRoomAndGoHome);
+
+// Bind Bot Toast Actions
+const btnAddAi = document.getElementById('btn-add-ai');
+if (btnAddAi) {
+    btnAddAi.addEventListener('click', async () => {
+        if (!isHost) return;
+        const newBot = {
+            id: 'ai-' + Math.random().toString(36).substring(2),
+            name: getRandomAiName(),
+            isReady: true,
+            score: 0,
+            totalWords: 0,
+            difficulty: 'Medium',
+            isAi: true,
+            updatedAt: Date.now()
+        };
+        myLocalAiPlayers.push(newBot);
+        await syncMyState();
+    });
+}
+
+const btnRejectAi = document.getElementById('btn-reject-ai');
+if (btnRejectAi) {
+    btnRejectAi.addEventListener('click', () => {
+        isAiRejected = true;
+        const aiToastEl = document.getElementById('ai-toast');
+        if (aiToastEl) aiToastEl.classList.add('hidden');
+    });
 }
 
 bootEngine();

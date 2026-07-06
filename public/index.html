@@ -14,6 +14,26 @@
 
 <body class="viewport-locked">
 
+    <!-- Global Theme Toggle -->
+    <button id="theme-toggle" class="theme-toggle-btn" title="Toggle Theme" type="button">
+        <!-- Sun Icon (shown in dark theme to switch to light) -->
+        <svg class="sun-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+        <!-- Moon Icon (shown in light theme to switch to dark) -->
+        <svg class="moon-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+    </button>
+
     <!-- OVERLAY 1: Boot Screen & Controls -->
     <div id="screen-boot" class="overlay-screen product-tile-parchment active">
         <h1 class="hero-display">WordPerfect</h1>
@@ -96,13 +116,34 @@
             </div>
         </div>
 
-        <div class="utility-card" style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 32px;">
+        <div class="utility-card" style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 24px;">
             <p class="caption-strong text-muted" style="margin-bottom: 16px; text-align: center;">PLAYERS</p>
             <ul id="lobby-player-list" class="body"
                 style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px;"></ul>
         </div>
 
+        <!-- AI Bot suggestion toast -->
+        <div id="ai-toast" class="utility-card hidden" style="width: 100%; max-width: 400px; padding: 12px 20px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; border-color: var(--primary); background-color: rgba(0, 102, 204, 0.03);">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span class="body-strong" style="font-size: 14px; letter-spacing: -0.1px;">Play with Bot?</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <button id="btn-add-ai" class="btn-toast-action check" type="button" title="Play with Bot">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                </button>
+                <button id="btn-reject-ai" class="btn-toast-action cross" type="button" title="Dismiss">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
         <button id="btn-ready-up" class="button-primary" style="padding: 14px 48px; font-size: 18px;">Ready Up</button>
+        <button id="btn-lobby-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to Home</button>
     </div>
     <!-- TUTORIAL SCREEN -->
     <div id="screenTutorial" class="overlay-screen product-tile-parchment">
@@ -166,6 +207,7 @@
                 style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 16px;"></ul>
         </div>
         <button id="btn-next-round" class="button-store-hero">View Standings</button>
+        <button id="btn-results-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to Home</button>
     </div>
 
     <!-- OVERLAY 5.5: Current Standings -->
@@ -177,8 +219,8 @@
         </div>
         <button id="btn-standings-ready" class="button-primary" style="padding: 14px 48px; font-size: 18px;">Ready for
             Next Round</button>
-        <button id="btn-standings-view-words" type="button" class="body-strong"
-            style="margin-top: 20px; padding: 12px 24px; background: transparent; color: rgba(255,255,255,0.65); border: 1px solid rgba(255,255,255,0.25); border-radius: 999px; cursor: pointer;">View Words</button>
+        <button id="btn-standings-view-words" type="button" class="body-strong button-view-words">View Words</button>
+        <button id="btn-standings-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to Home</button>
     </div>
 
     <!-- OVERLAY 6: Game Over / Winner Podium -->
@@ -191,12 +233,13 @@
         <button id="btn-play-again" class="button-primary hidden" style="padding: 14px 48px; font-size: 18px;">Play
             Again</button>
         <p id="guest-waiting-msg" class="body-muted hidden">Waiting for host to restart...</p>
+        <button id="btn-winner-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to Home</button>
     </div>
 
     <!-- MAIN GAME CHASSIS -->
     <div id="screen-game" class="game-container">
         <nav class="global-nav">
-            <div class="nav-cluster-left"><span class="nav-link">WordPerfect</span></div>
+            <div class="nav-cluster-left"><span class="nav-link" id="nav-home-btn" style="cursor: pointer;" title="Back to Home">WordPerfect</span></div>
             <div class="nav-cluster-center"><span class="nav-link" id="nav-room-display">Room: ----</span></div>
             <div class="nav-cluster-right"><span class="nav-link" id="nav-round-display">Round 1</span></div>
         </nav>
@@ -255,11 +298,15 @@
 
         <div class="floating-sticky-bar">
             <div class="bar-content">
-                <div class="score-cluster">
-                    <span class="body-strong" id="total-score-display">Total: 0 pts</span>
-                    <span class="caption text-muted" id="round-score-display">Drafted: 0 words</span>
+                <div class="bar-grid-align">
+                    <div class="score-cluster">
+                        <span class="body-strong" id="total-score-display">Total: 0 pts</span>
+                        <span class="caption text-muted" id="round-score-display">Drafted: 0 words</span>
+                    </div>
                 </div>
-                <button id="submit-round" class="button-primary">Lock In Early</button>
+                <div class="bar-workspace-align">
+                    <button id="submit-round" class="button-primary">Lock In Early</button>
+                </div>
             </div>
         </div>
     </div>
