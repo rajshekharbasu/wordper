@@ -105,6 +105,7 @@ let currentRound = 1;
 let maxRounds = 3;
 let secondsPerRound = 60;
 let myTotalScore = 0;
+let myTotalWords = 0;
 let dictionarySet = new Set();
 let penaltyActive = false;
 let penaltyTimeLeft = 5;
@@ -192,6 +193,11 @@ async function bootEngine() {
             if (savedScore) {
                 myTotalScore = parseInt(savedScore);
                 totalScoreDisplay.textContent = `Total: ${myTotalScore} pts`;
+            }
+            
+            const savedWords = sessionStorage.getItem('wordperfect_total_words');
+            if (savedWords) {
+                myTotalWords = parseInt(savedWords);
             }
 
             // Restore round state if we were playing mid-round
@@ -282,6 +288,7 @@ async function syncMyState() {
         name: myPlayerName,
         isReady: isReady,
         score: myTotalScore,
+        totalWords: myTotalWords,
         isHost: isHost,
         updatedAt: Date.now() // FIX: Forces Supabase to broadcast the change
     };
@@ -362,7 +369,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
         renderLobbyPlayers(activePlayersList);
         if (screenStandings.classList.contains('active')) {
-            renderStandingsScreen(activePlayersList);
+            renderStandingsScreen(activePlayersList, currentRound > 1 ? currentRound - 1 : 1);
         }
 
         // Host checks if everyone is ready to start
@@ -510,7 +517,9 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         const myResult = data.players.find(p => p.id === myPlayerId);
         if (myResult) {
             myTotalScore = myResult.score;
+            myTotalWords = myResult.totalWords || 0;
             sessionStorage.setItem('wordperfect_total_score', myTotalScore.toString());
+            sessionStorage.setItem('wordperfect_total_words', myTotalWords.toString());
             totalScoreDisplay.textContent = `Total: ${myTotalScore} pts`;
             await syncMyState(); // Update presence with new score
         }
@@ -518,7 +527,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         if (data.isGameOver) {
             resultsTitle.textContent = "Final Round Results";
             btnNextRound.textContent = "View Final Standings";
-            btnNextRound.onclick = () => renderWinnerScreen(data.players);
+            btnNextRound.onclick = () => renderWinnerScreen(data.players, data.currentRound);
         } else {
             currentRound = data.currentRound + 1;
             updateLobbyRoundText();
@@ -527,7 +536,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             btnNextRound.onclick = () => {
                 hideOverlay(screenResults);
                 showOverlay(screenStandings);
-                renderStandingsScreen(data.players);
+                renderStandingsScreen(data.players, data.currentRound);
             };
         }
     });
@@ -535,6 +544,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
     roomChannel.on('broadcast', { event: 'game_reset' }, async () => {
         currentRound = 1;
         myTotalScore = 0;
+        myTotalWords = 0;
         isReady = false;
         resetReadyButtons();
         updateLobbyRoundText();
@@ -638,7 +648,10 @@ async function calculateScoresAndBroadcast() {
 
         if (!isDuplicate) {
             let playerRef = tempPlayers.find(p => p.name === authors[0]);
-            if (playerRef) playerRef.score += points;
+            if (playerRef) {
+                playerRef.score += points;
+                playerRef.totalWords = (playerRef.totalWords || 0) + 1;
+            }
         }
     }
 
@@ -845,7 +858,7 @@ function renderLobbyPlayers(players) {
     });
 }
 
-function renderStandingsScreen(players) {
+function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? currentRound - 1 : 1) {
     const sorted = [...players].sort((a, b) => b.score - a.score);
     standingsList.innerHTML = '';
 
@@ -853,12 +866,20 @@ function renderStandingsScreen(players) {
         const rank = index + 1;
         const div = document.createElement('div');
         div.className = `winner-card ${rank === 1 ? 'rank-1' : ''}`;
+        div.style.flexDirection = 'column';
+        div.style.alignItems = 'stretch';
+        div.style.cursor = 'pointer';
 
         let rankLabel = rank === 1 ? '🥇 1st' : rank === 2 ? '🥈 2nd' : rank === 3 ? '🥉 3rd' : `${rank}th`;
         const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
         const readyIndicator = p.isReady
             ? `<span class="ready-indicator ready" title="Ready"></span>`
             : `<span class="ready-indicator" title="Not Ready"></span>`;
+
+        const tWords = p.totalWords || 0;
+        const ptsPerRound = (p.score / roundsPlayed).toFixed(1);
+        const wordsPerRound = (tWords / roundsPlayed).toFixed(1);
+        const ptsPerWord = tWords > 0 ? (p.score / tWords).toFixed(1) : "0.0";
 
         div.innerHTML = `
             <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
@@ -869,14 +890,50 @@ function renderStandingsScreen(players) {
                 <div style="display: flex; align-items: center; gap: 16px;">
                     <span style="display: flex; align-items: center; justify-content: flex-end; min-width: 30px;">${readyIndicator}</span>
                     <span class="display-md" style="min-width: 60px; text-align: right;">${p.score}</span>
+                    <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; transition: transform 0.3s var(--ease-out); opacity: 0.5;">
+                        <polyline points="6 9 12 15 18 9"></polyline>
+                    </svg>
+                </div>
+            </div>
+            <div class="stats-collapse" style="max-height: 0px; overflow: hidden; opacity: 0; transition: all 0.3s var(--ease-out);">
+                <div style="padding-top: 16px; margin-top: 16px; border-top: 1px solid ${rank === 1 ? 'rgba(0,102,204,0.15)' : 'var(--hairline)'}; display: flex; justify-content: space-around; text-align: center;">
+                    <div>
+                        <div class="body-strong">${ptsPerRound}</div>
+                        <div class="caption text-muted">Pts/Round</div>
+                    </div>
+                    <div>
+                        <div class="body-strong">${wordsPerRound}</div>
+                        <div class="caption text-muted">Words/Round</div>
+                    </div>
+                    <div>
+                        <div class="body-strong">${ptsPerWord}</div>
+                        <div class="caption text-muted">Avg Ratio</div>
+                    </div>
                 </div>
             </div>
         `;
+
+        div.addEventListener('click', () => {
+            const collapse = div.querySelector('.stats-collapse');
+            const chevron = div.querySelector('.chevron');
+            const isExpanded = collapse.style.maxHeight !== '0px';
+            
+            if (isExpanded) {
+                collapse.style.maxHeight = '0px';
+                collapse.style.opacity = '0';
+                chevron.style.transform = 'rotate(0deg)';
+            } else {
+                collapse.style.maxHeight = '120px';
+                collapse.style.opacity = '1';
+                chevron.style.transform = 'rotate(180deg)';
+            }
+        });
+
         standingsList.appendChild(div);
     });
 }
 
-function renderWinnerScreen(players) {
+function renderWinnerScreen(players, roundsPlayed = maxRounds) {
     hideOverlay(screenResults);
     showOverlay(screenWinner);
 
@@ -887,17 +944,65 @@ function renderWinnerScreen(players) {
         const rank = index + 1;
         const div = document.createElement('div');
         div.className = `winner-card ${rank === 1 ? 'rank-1' : ''}`;
+        div.style.flexDirection = 'column';
+        div.style.alignItems = 'stretch';
+        div.style.cursor = 'pointer';
 
         let rankLabel = rank === 1 ? '🥇 1st' : rank === 2 ? '🥈 2nd' : rank === 3 ? '🥉 3rd' : `${rank}th`;
         const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
 
+        const tWords = p.totalWords || 0;
+        const ptsPerRound = (p.score / roundsPlayed).toFixed(1);
+        const wordsPerRound = (tWords / roundsPlayed).toFixed(1);
+        const ptsPerWord = tWords > 0 ? (p.score / tWords).toFixed(1) : "0.0";
+
         div.innerHTML = `
-            <div>
-                <span class="caption-strong rank-text" style="margin-right: 12px;">${rankLabel}</span>
-                <span class="body-strong">${nameDisplay}</span>
+            <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+                <div style="display: flex; align-items: center;">
+                    <span class="caption-strong rank-text" style="margin-right: 12px;">${rankLabel}</span>
+                    <span class="body-strong">${nameDisplay}</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 16px;">
+                    <span class="display-md" style="text-align: right;">${p.score} <span class="caption text-muted">pts</span></span>
+                    <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; transition: transform 0.3s var(--ease-out); opacity: 0.5;">
+                        <polyline points="6 9 12 15 18 9"></polyline>
+                    </svg>
+                </div>
             </div>
-            <span class="display-md">${p.score} <span class="caption text-muted">pts</span></span>
+            <div class="stats-collapse" style="max-height: 0px; overflow: hidden; opacity: 0; transition: all 0.3s var(--ease-out);">
+                <div style="padding-top: 16px; margin-top: 16px; border-top: 1px solid ${rank === 1 ? 'rgba(0,102,204,0.15)' : 'var(--hairline)'}; display: flex; justify-content: space-around; text-align: center;">
+                    <div>
+                        <div class="body-strong">${ptsPerRound}</div>
+                        <div class="caption text-muted">Pts/Round</div>
+                    </div>
+                    <div>
+                        <div class="body-strong">${wordsPerRound}</div>
+                        <div class="caption text-muted">Words/Round</div>
+                    </div>
+                    <div>
+                        <div class="body-strong">${ptsPerWord}</div>
+                        <div class="caption text-muted">Avg Ratio</div>
+                    </div>
+                </div>
+            </div>
         `;
+        
+        div.addEventListener('click', () => {
+            const collapse = div.querySelector('.stats-collapse');
+            const chevron = div.querySelector('.chevron');
+            const isExpanded = collapse.style.maxHeight !== '0px';
+            
+            if (isExpanded) {
+                collapse.style.maxHeight = '0px';
+                collapse.style.opacity = '0';
+                chevron.style.transform = 'rotate(0deg)';
+            } else {
+                collapse.style.maxHeight = '120px';
+                collapse.style.opacity = '1';
+                chevron.style.transform = 'rotate(180deg)';
+            }
+        });
+
         winnerList.appendChild(div);
     });
 
