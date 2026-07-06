@@ -400,9 +400,9 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         const aiToastEl = document.getElementById('ai-toast');
         if (aiToastEl) {
             if (isHost && isSingleRealPlayer && !hasAi && !isAiRejected) {
-                aiToastEl.classList.remove('hidden');
+                aiToastEl.classList.add('visible');
             } else {
-                aiToastEl.classList.add('hidden');
+                aiToastEl.classList.remove('visible');
             }
         }
 
@@ -1012,11 +1012,28 @@ function updateLobbyRoundText() {
     roundIndicator.textContent = `Round ${currentRound}/${maxRounds}`;
 }
 
+function adjustSelectWidth(select) {
+    const tempSpan = document.createElement('span');
+    tempSpan.style.visibility = 'hidden';
+    tempSpan.style.position = 'absolute';
+    tempSpan.style.fontFamily = getComputedStyle(select).fontFamily || 'sans-serif';
+    tempSpan.style.fontSize = getComputedStyle(select).fontSize || '11px';
+    tempSpan.style.fontWeight = getComputedStyle(select).fontWeight || '600';
+    tempSpan.style.textTransform = 'uppercase';
+    tempSpan.style.letterSpacing = '0.5px';
+    tempSpan.textContent = select.options[select.selectedIndex].text;
+    document.body.appendChild(tempSpan);
+    const width = tempSpan.getBoundingClientRect().width;
+    select.style.width = `${width + 28}px`; // 8px left + 20px right for arrow
+    document.body.removeChild(tempSpan);
+}
+
 function renderLobbyPlayers(players) {
     lobbyPlayerList.innerHTML = '';
-    players.forEach(p => {
+    players.forEach((p, index) => {
         const li = document.createElement('li');
         li.className = `lobby-player-item ${p.isAi ? 'ai-player' : ''}`;
+        li.style.animationDelay = `${index * 50}ms`;
         
         const readyIndicator = p.isReady
             ? `<span class="ready-indicator ready" title="Ready"></span>`
@@ -1050,9 +1067,12 @@ function renderLobbyPlayers(players) {
     if (isHost) {
         const selects = lobbyPlayerList.querySelectorAll('.ai-difficulty-select-pill');
         selects.forEach(select => {
+            adjustSelectWidth(select);
+
             select.addEventListener('change', async (e) => {
-                const aiId = e.target.getAttribute('data-ai-id');
-                const newDifficulty = e.target.value;
+                adjustSelectWidth(select);
+                const aiId = select.getAttribute('data-ai-id');
+                const newDifficulty = select.value;
                 const ai = myLocalAiPlayers.find(bot => bot.id === aiId);
                 if (ai) {
                     ai.difficulty = newDifficulty;
@@ -1064,7 +1084,9 @@ function renderLobbyPlayers(players) {
         const removeBtns = lobbyPlayerList.querySelectorAll('.btn-remove-ai-inline');
         removeBtns.forEach(btn => {
             btn.addEventListener('click', async (e) => {
-                const aiId = e.target.getAttribute('data-ai-id');
+                e.stopPropagation();
+                const aiId = btn.getAttribute('data-ai-id');
+                console.log("Removing bot with ID:", aiId);
                 myLocalAiPlayers = myLocalAiPlayers.filter(bot => bot.id !== aiId);
                 await syncMyState();
             });
@@ -1747,7 +1769,7 @@ if (btnRejectAi) {
     btnRejectAi.addEventListener('click', () => {
         isAiRejected = true;
         const aiToastEl = document.getElementById('ai-toast');
-        if (aiToastEl) aiToastEl.classList.add('hidden');
+        if (aiToastEl) aiToastEl.classList.remove('visible');
     });
 }
 
