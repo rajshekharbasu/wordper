@@ -71,6 +71,7 @@ function saveGameStateToSession() {
     sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
     sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
     sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
+    sessionStorage.setItem('wordperfect_score_mode', scoreMode);
     sessionStorage.setItem('wordperfect_time_left', timeLeft.toString());
     sessionStorage.setItem('wordperfect_total_score', myTotalScore.toString());
 }
@@ -81,6 +82,7 @@ function clearGameStateFromSession() {
     sessionStorage.removeItem('wordperfect_current_round');
     sessionStorage.removeItem('wordperfect_max_rounds');
     sessionStorage.removeItem('wordperfect_seconds_per_round');
+    sessionStorage.removeItem('wordperfect_score_mode');
     sessionStorage.removeItem('wordperfect_time_left');
     // Every caller here is starting a fresh game, so the carried score must go too —
     // otherwise a refresh after "Play Again" restores the previous game's total.
@@ -107,6 +109,7 @@ let physicsAnimId = null;
 let currentRound = 1;
 let maxRounds = 3;
 let secondsPerRound = 60;
+let scoreMode = 'classic'; // 'classic' = 1pt/letter, 'scrabble' = letter-value scoring
 let myTotalScore = 0;
 let myTotalWords = 0;
 let dictionarySet = new Set();
@@ -148,6 +151,9 @@ const lobbyInputRounds = document.getElementById('lobby-input-rounds');
 const lobbyRoundsDisplay = document.getElementById('lobby-rounds-display');
 const lobbyInputTime = document.getElementById('lobby-input-time');
 const lobbyTimeDisplay = document.getElementById('lobby-time-display');
+const lobbyModeToggle = document.getElementById('lobby-mode-toggle');
+const modeToggleHint = document.getElementById('mode-toggle-hint');
+const modeToggleBtns = lobbyModeToggle ? Array.from(lobbyModeToggle.querySelectorAll('.mode-toggle-btn')) : [];
 const btnCreateRoom = document.getElementById('btn-create-room');
 const btnJoinRoom = document.getElementById('btn-join-room');
 const joinErrorMsg = document.getElementById('join-error-msg');
@@ -164,6 +170,8 @@ const btnStandingsViewWords = document.getElementById('btn-standings-view-words'
 const btnCopyLink = document.getElementById('btn-copy-link');
 // (Removed the dead btnStandingsToLobby reference here)
 const resultsList = document.getElementById('results-list');
+const resultsFilterBar = document.getElementById('results-filter-bar');
+const resultsEmptyMsg = document.getElementById('results-empty-msg');
 const idlePrompt = document.getElementById('results-idle-prompt');
 const btnIdleRefresher = document.getElementById('btn-idle-refresher');
 const rulesRecapModal = document.getElementById('rules-recap-modal');
@@ -305,8 +313,9 @@ async function bootEngine() {
                 const savedCurRound = sessionStorage.getItem('wordperfect_current_round');
                 const savedMaxRounds = sessionStorage.getItem('wordperfect_max_rounds');
                 const savedSecondsPerRound = sessionStorage.getItem('wordperfect_seconds_per_round');
+                const savedScoreMode = sessionStorage.getItem('wordperfect_score_mode');
                 const savedTimeLeft = sessionStorage.getItem('wordperfect_time_left');
-                
+
                 if (savedBoard) {
                     boardLetters = JSON.parse(savedBoard);
                 }
@@ -318,6 +327,9 @@ async function bootEngine() {
                 }
                 if (savedSecondsPerRound) {
                     secondsPerRound = parseInt(savedSecondsPerRound);
+                }
+                if (savedScoreMode) {
+                    scoreMode = savedScoreMode;
                 }
                 if (savedTimeLeft) {
                     timeLeft = parseInt(savedTimeLeft);
@@ -371,6 +383,35 @@ lobbyInputTime.addEventListener('change', async () => {
     await syncMyState();
 });
 
+// Reflects scoreMode onto the toggle buttons + hint caption. Called for local changes,
+// remote guest sync, and on (re)join — the one place that knows how to paint this state.
+function setModeToggleUI(mode) {
+    modeToggleBtns.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.mode === mode);
+    });
+    if (modeToggleHint) {
+        modeToggleHint.textContent = mode === 'scrabble'
+            ? 'Rare letters score more (Scrabble values).'
+            : '1 point per letter.';
+    }
+}
+
+if (lobbyModeToggle) {
+    lobbyModeToggle.addEventListener('click', async (e) => {
+        if (!isHost) return;
+        const btn = e.target.closest('.mode-toggle-btn');
+        if (!btn || btn.dataset.mode === scoreMode) return;
+
+        scoreMode = btn.dataset.mode;
+        setModeToggleUI(scoreMode);
+        if (isReady) {
+            isReady = false;
+            resetReadyButtons();
+        }
+        await syncMyState();
+    });
+}
+
 
 // --- SUPABASE REALTIME LOGIC ---
 
@@ -393,6 +434,7 @@ async function syncMyState() {
     if (isHost) {
         trackPayload.maxRounds = maxRounds;
         trackPayload.roundTime = secondsPerRound;
+        trackPayload.scoreMode = scoreMode;
         trackPayload.aiPlayers = myLocalAiPlayers;
     }
 
@@ -463,6 +505,11 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                     lobbyTimeDisplay.textContent = `${secondsPerRound}s`;
                     settingsChanged = true;
                 }
+                if (hostPlayer.scoreMode !== undefined && hostPlayer.scoreMode !== scoreMode) {
+                    scoreMode = hostPlayer.scoreMode;
+                    setModeToggleUI(scoreMode);
+                    settingsChanged = true;
+                }
                 if (settingsChanged) {
                     updateLobbyRoundText();
                     if (isReady) {
@@ -527,6 +574,8 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         boardLetters = data.board;
         maxRounds = data.maxRounds || 3;
         secondsPerRound = data.roundTime || 60;
+        scoreMode = data.scoreMode || 'classic';
+        setModeToggleUI(scoreMode);
 
         isReady = false;
         resetReadyButtons();
@@ -535,6 +584,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
         sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
         sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
+        sessionStorage.setItem('wordperfect_score_mode', scoreMode);
         sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
         sessionStorage.setItem('wordperfect_is_playing', 'true');
 
@@ -556,6 +606,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                     currentRound: currentRound,
                     maxRounds: maxRounds,
                     roundTime: secondsPerRound,
+                    scoreMode: scoreMode,
                     timeLeft: timeLeft
                 }
             });
@@ -573,12 +624,15 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             currentRound = data.currentRound;
             maxRounds = data.maxRounds;
             secondsPerRound = data.roundTime || 60;
-            
+            scoreMode = data.scoreMode || 'classic';
+            setModeToggleUI(scoreMode);
+
             // Persist to session storage
             sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
             sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
             sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
             sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
+            sessionStorage.setItem('wordperfect_score_mode', scoreMode);
             sessionStorage.setItem('wordperfect_is_playing', 'true');
             sessionStorage.setItem('wordperfect_time_left', data.timeLeft.toString());
 
@@ -617,31 +671,52 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         isReady = false;
         resetReadyButtons();
 
-        // Sort results: active words first (longest first), duplicate/cancelled words last (longest first)
+        // Sort results: active words first, highest points first — word length isn't a
+        // proxy for points in Scrabble mode (a short QUIZ can outscore a long, low-value
+        // word), so this has to key on the actual points, not the word's length.
         const sortedResults = [...data.results].sort((a, b) => {
             if (a.isDuplicate !== b.isDuplicate) {
                 return a.isDuplicate ? 1 : -1;
             }
-            return b.word.length - a.word.length;
+            if (b.points !== a.points) return b.points - a.points;
+            return b.word.length - a.word.length; // tie-break: longer word first
         });
 
-        // Render the results list
+        // Render the results list — tap any word (cancelled or not) to look up its meaning
         resultsList.innerHTML = '';
         sortedResults.forEach(res => {
             const li = document.createElement('li');
             li.className = `result-row ${res.isDuplicate ? 'duplicate-word' : 'unique-word'}`;
+            li.dataset.authors = JSON.stringify(res.authors); // read by the player filter
             const authorsText = res.authors.join(', ');
             const pointsText = res.isDuplicate ? 'CANCELLED' : `+${res.points} pts`;
 
             li.innerHTML = `
-                <div style="display:flex; flex-direction:column;">
-                    <span class="result-word">${res.word}</span>
-                    <span class="caption result-authors">${authorsText}</span>
+                <div class="result-row-header">
+                    <div style="display:flex; flex-direction:column;">
+                        <span class="result-word">${res.word}</span>
+                        <span class="caption result-authors">${authorsText}</span>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <span class="result-points">${pointsText}</span>
+                        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; transition: transform 0.3s var(--ease-out); opacity: 0.5; flex-shrink: 0;">
+                            <polyline points="6 9 12 15 18 9"></polyline>
+                        </svg>
+                    </div>
                 </div>
-                <span class="result-points">${pointsText}</span>
+                <div class="def-collapse" style="max-height: 0px; opacity: 0; transition: all 0.3s var(--ease-out);">
+                    <p class="caption def-text">Tap to see meaning</p>
+                </div>
             `;
+            li.addEventListener('click', () => toggleResultDefinition(li, res.word));
             resultsList.appendChild(li);
         });
+
+        // Filter pills: one per player in the room this round (ranked like the podium),
+        // reset to "All" on every fresh round rather than carrying a stale selection.
+        const roundPlayerNames = [...data.players].sort((a, b) => b.score - a.score).map(p => p.name);
+        renderResultsFilterBar(roundPlayerNames);
+        applyResultsFilter('all');
 
         // Update my local score
         const myResult = data.players.find(p => p.id === myPlayerId);
@@ -699,10 +774,13 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             if (isHost) {
                 lobbyInputRounds.disabled = false;
                 lobbyInputTime.disabled = false;
+                if (lobbyModeToggle) lobbyModeToggle.classList.remove('disabled');
             } else {
                 lobbyInputRounds.disabled = true;
                 lobbyInputTime.disabled = true;
+                if (lobbyModeToggle) lobbyModeToggle.classList.add('disabled');
             }
+            setModeToggleUI(scoreMode);
 
             // isHost is settled by now, so the ready button can claim its real label
             resetReadyButtons();
@@ -762,7 +840,7 @@ async function startGameAsHost() {
     await roomChannel.send({
         type: 'broadcast',
         event: 'trigger_game',
-        payload: { board: newBoard, maxRounds: maxRounds, roundTime: secondsPerRound }
+        payload: { board: newBoard, maxRounds: maxRounds, roundTime: secondsPerRound, scoreMode: scoreMode }
     });
 }
 
@@ -799,6 +877,20 @@ function finalizeRound() {
     clearTimeout(finalizeWatchdog);
     finalizeWatchdog = null;
     calculateScoresAndBroadcast();
+}
+
+const SCRABBLE_VALUES = {
+    A: 1, B: 3, C: 3, D: 2, E: 1, F: 4, G: 2, H: 4, I: 1, J: 8, K: 5, L: 1, M: 3,
+    N: 1, O: 1, P: 3, Q: 10, R: 1, S: 1, T: 1, U: 1, V: 4, W: 4, X: 8, Y: 4, Z: 10
+};
+
+// The one place points are computed, so a new mode is a new branch here — everything
+// downstream (results, standings, winner) already just reads `points`/`score` generically.
+function scoreWord(word) {
+    if (scoreMode === 'scrabble') {
+        return [...word].reduce((sum, ch) => sum + (SCRABBLE_VALUES[ch] || 0), 0);
+    }
+    return word.length; // classic
 }
 
 async function calculateScoresAndBroadcast() {
@@ -856,7 +948,7 @@ async function calculateScoresAndBroadcast() {
     for (let word in wordMap) {
         let authors = wordMap[word];
         let isDuplicate = authors.length > 1;
-        let points = isDuplicate ? 0 : word.length;
+        let points = isDuplicate ? 0 : scoreWord(word);
 
         results.push({ word, authors, isDuplicate, points });
 
@@ -1047,6 +1139,7 @@ function hasValidName() {
 btnCreateRoom.addEventListener('click', async () => {
     maxRounds = 3; // Default starting rounds
     secondsPerRound = 60; // Default starting round duration
+    scoreMode = 'classic'; // Default starting mode
     if (!hasValidName()) return;
     myPlayerName = inputPlayerName.value.trim();
 
@@ -1058,6 +1151,7 @@ btnCreateRoom.addEventListener('click', async () => {
     lobbyRoundsDisplay.textContent = `${maxRounds} Round${maxRounds > 1 ? 's' : ''}`;
     lobbyInputTime.value = secondsPerRound;
     lobbyTimeDisplay.textContent = `${secondsPerRound}s`;
+    setModeToggleUI(scoreMode);
 
     clearGameStateFromSession();
 
@@ -1239,6 +1333,58 @@ function updateLobbyRoundText() {
     lobbyRoundText.textContent = `Round ${currentRound} of ${maxRounds}`;
     navRoundDisplay.textContent = `Round ${currentRound}/${maxRounds}`;
     roundIndicator.textContent = `Round ${currentRound}/${maxRounds}`;
+}
+
+// --- RESULTS PLAYER FILTER ---
+// Rows are never re-rendered when the filter changes — only shown/hidden — so an already
+// expanded definition (and its cached text) survives switching between players.
+let currentResultsFilter = 'all';
+
+function renderResultsFilterBar(playerNames) {
+    resultsFilterBar.innerHTML = '';
+    resultsFilterBar.classList.toggle('hidden', playerNames.length === 0);
+    if (playerNames.length === 0) return;
+
+    const allBtn = document.createElement('button');
+    allBtn.type = 'button';
+    allBtn.className = 'filter-pill active';
+    allBtn.dataset.player = 'all';
+    allBtn.textContent = 'All';
+    resultsFilterBar.appendChild(allBtn);
+
+    playerNames.forEach(name => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'filter-pill';
+        btn.dataset.player = name;
+        btn.textContent = name === myPlayerName ? `${name} (You)` : name;
+        resultsFilterBar.appendChild(btn);
+    });
+}
+
+function applyResultsFilter(playerName) {
+    currentResultsFilter = playerName;
+
+    let anyVisible = false;
+    resultsList.querySelectorAll('.result-row').forEach(li => {
+        let authors = [];
+        try { authors = JSON.parse(li.dataset.authors || '[]'); } catch (e) { /* leave empty */ }
+        const show = playerName === 'all' || authors.includes(playerName);
+        li.classList.toggle('hidden', !show);
+        if (show) anyVisible = true;
+    });
+    resultsEmptyMsg.classList.toggle('hidden', anyVisible);
+
+    resultsFilterBar.querySelectorAll('.filter-pill').forEach(p => {
+        p.classList.toggle('active', p.dataset.player === playerName);
+    });
+}
+
+if (resultsFilterBar) {
+    resultsFilterBar.addEventListener('click', (e) => {
+        const btn = e.target.closest('.filter-pill');
+        if (btn) applyResultsFilter(btn.dataset.player);
+    });
 }
 
 function adjustSelectWidth(select) {
@@ -1729,6 +1875,10 @@ function finishTutorialToDemo() {
     });
 
     idlePrompt.classList.add('hidden');
+    // The demo has no real roster to filter, and no meanings wired up — keep it simple
+    resultsFilterBar.classList.add('hidden');
+    resultsFilterBar.innerHTML = '';
+    resultsEmptyMsg.classList.add('hidden');
     btnNextRound.textContent = 'Finish tutorial';
     btnNextRound.onclick = endTutorial;
     showOverlay(screenResults);
@@ -1943,6 +2093,63 @@ function isPlural(word) {
         if (dictionarySet.has(baseIES)) return true;
     }
     return false;
+}
+
+// --- WORD DEFINITIONS (lazy, decoupled from validation) ---
+// Deliberately separate from dictionarySet: validation must stay an instant, offline
+// Set.has() lookup so submissions keep feeling realtime. Meanings are a rarely-used,
+// per-word extra, so they are fetched only when a player actually taps a word, and cached
+// so each word is looked up at most once per session (including a "not found" result).
+const definitionCache = new Map();
+
+async function fetchDefinition(word) {
+    const key = word.toUpperCase();
+    if (definitionCache.has(key)) return definitionCache.get(key);
+
+    let meaning = null;
+    try {
+        const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.toLowerCase())}`);
+        if (res.ok) {
+            const data = await res.json();
+            const entry = data?.[0]?.meanings?.[0];
+            const def = entry?.definitions?.[0]?.definition;
+            if (def) meaning = entry.partOfSpeech ? `(${entry.partOfSpeech}) ${def}` : def;
+        }
+    } catch (e) {
+        console.warn('Definition lookup failed for', word, e);
+    }
+
+    definitionCache.set(key, meaning); // cache the miss too, so a bad word isn't refetched
+    return meaning;
+}
+
+// Expand/collapse a results row and lazy-load its meaning on first open. Mirrors the
+// max-height/opacity collapse pattern already used by the standings and winner cards.
+async function toggleResultDefinition(li, word) {
+    const collapse = li.querySelector('.def-collapse');
+    const chevron = li.querySelector('.chevron');
+    const defText = li.querySelector('.def-text');
+    const isExpanded = collapse.style.maxHeight !== '0px' && collapse.style.maxHeight !== '';
+
+    if (isExpanded) {
+        collapse.style.maxHeight = '0px';
+        collapse.style.opacity = '0';
+        if (chevron) chevron.style.transform = 'rotate(0deg)';
+        return;
+    }
+
+    collapse.style.maxHeight = '140px';
+    collapse.style.opacity = '1';
+    if (chevron) chevron.style.transform = 'rotate(180deg)';
+
+    // dataset.loaded is set synchronously before the await, so a second tap while the
+    // fetch is still in flight sees it immediately and does not fire a duplicate request.
+    if (defText.dataset.loaded) return;
+    defText.dataset.loaded = 'pending';
+    defText.textContent = 'Looking up…';
+    const meaning = await fetchDefinition(word);
+    defText.textContent = meaning || 'Meaning unavailable.';
+    defText.dataset.loaded = 'done';
 }
 
 // Surfaces a failure reason inside the offending field itself: shake it, clear it,

@@ -133,6 +133,16 @@
                 </div>
                 <input type="range" id="lobby-input-time" class="slider" min="15" max="180" step="5" value="60">
             </div>
+
+            <!-- Game Mode Customiser -->
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <span class="body-strong">Game Mode</span>
+                <div class="mode-toggle" id="lobby-mode-toggle" role="group" aria-label="Scoring mode">
+                    <button type="button" class="mode-toggle-btn active" data-mode="classic">Classic</button>
+                    <button type="button" class="mode-toggle-btn" data-mode="scrabble">Scrabble</button>
+                </div>
+                <p class="caption text-muted" id="mode-toggle-hint">1 point per letter.</p>
+            </div>
         </div>
 
         <div class="utility-card" style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 24px;">
@@ -187,10 +197,14 @@
             <span class="body-strong">You didn't find any words. Are you still playing?</span>
             <button id="btn-idle-refresher" class="button-ghost idle-prompt-btn" type="button">Quick refresher</button>
         </div>
+        <!-- Filter pills: "All" + one per player who is in the room this round -->
+        <div id="results-filter-bar" class="filter-pill-bar hidden"></div>
         <div class="utility-card"
             style="width: 100%; max-width: 500px; padding: 24px; margin: 32px 0; max-height: 50vh; overflow-y: auto;">
             <ul id="results-list" class="body"
                 style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 16px;"></ul>
+            <p class="caption text-muted hidden" id="results-empty-msg" style="text-align: center;">No words
+                submitted this round.</p>
         </div>
         <button id="btn-next-round" class="button-store-hero">View Standings</button>
         <button id="btn-results-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to

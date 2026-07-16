@@ -1184,17 +1184,40 @@ body.penalized .game-container {
 }
 
 /* --- MULTIPLAYER RESULT STYLING --- */
+/* Column now, not a flat row: tapping any word (cancelled or not) reveals its meaning
+   below the header, so the row needs somewhere for that content to expand into. */
 .result-row {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--hairline);
+  cursor: pointer;
 }
 
 .result-row:last-child {
   border-bottom: none;
   padding-bottom: 0;
+}
+
+.result-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+}
+
+.def-collapse {
+  overflow: hidden;
+}
+
+.def-text {
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid var(--hairline);
+  color: var(--body-muted);
+  line-height: 1.45;
 }
 
 .result-word {
@@ -1950,5 +1973,93 @@ body.viewport-locked {
   .coach-spotlight,
   .coach-tip {
     transition: none;
+  }
+}
+
+/* ==========================================================================
+   GAME MODE TOGGLE (lobby)
+   ========================================================================== */
+
+.mode-toggle {
+  display: flex;
+  border-radius: var(--rounded-pill);
+  background-color: var(--surface-tile-3);
+  padding: 4px;
+  gap: 4px;
+}
+
+.mode-toggle-btn {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--rounded-pill);
+  background: transparent;
+  color: var(--body-muted);
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 200ms var(--ease-out), color 200ms var(--ease-out), transform 160ms var(--ease-out);
+}
+
+.mode-toggle-btn:active {
+  transform: scale(0.96);
+}
+
+.mode-toggle-btn.active {
+  background-color: var(--primary);
+  color: var(--on-primary);
+}
+
+.mode-toggle.disabled .mode-toggle-btn {
+  cursor: default;
+}
+
+.mode-toggle.disabled .mode-toggle-btn:active {
+  transform: none;
+}
+
+/* ==========================================================================
+   RESULTS PLAYER FILTER
+   ========================================================================== */
+
+.filter-pill-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 500px;
+  margin-top: 16px;
+}
+
+.filter-pill {
+  padding: 6px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--rounded-pill);
+  background-color: var(--canvas);
+  color: var(--body-muted);
+  font-family: var(--font-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 200ms var(--ease-out), color 200ms var(--ease-out),
+              border-color 200ms var(--ease-out), transform 160ms var(--ease-out);
+}
+
+.filter-pill:active {
+  transform: scale(0.95);
+}
+
+.filter-pill.active {
+  background-color: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-primary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .filter-pill:not(.active):hover {
+    border-color: var(--primary);
+    color: var(--ink);
   }
 }
