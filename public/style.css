@@ -378,11 +378,181 @@ body.penalized .theme-toggle-btn {
   opacity: 1;
   transform: translateY(0) scale(1);
   pointer-events: auto;
-  max-height: 60px; /* height to contain contents */
+  max-height: 76px; /* height to contain contents */
   margin-bottom: 24px !important;
   padding-top: 12px !important;
   padding-bottom: 12px !important;
   border-width: 1px !important;
+}
+
+/* Bot on/off switch */
+.ai-switch {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--rounded-pill);
+  border: 1px solid var(--hairline);
+  background-color: var(--surface-tile-3);
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 250ms var(--ease-out), border-color 250ms var(--ease-out);
+}
+
+.ai-switch[aria-checked="true"] {
+  background-color: var(--primary);
+  border-color: var(--primary);
+}
+
+.ai-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background-color: var(--canvas);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 250ms var(--ease-out);
+}
+
+.ai-switch[aria-checked="true"] .ai-switch-thumb {
+  transform: translateX(18px);
+}
+
+/* Landing page rules summary */
+.pitch-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pitch-list li {
+  position: relative;
+  padding-left: 18px;
+  font-family: var(--font-text);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--body-muted);
+}
+
+.pitch-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--primary);
+}
+
+.pitch-list strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Leave-game confirmation dialog */
+.dialog-scrim {
+  background-color: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* Both selectors must be named: `.overlay-screen` sets z-index 100 further down this
+   file, so a lone `.dialog-scrim` ties on specificity and loses on order — leaving the
+   dialog stranded behind Results (150) and Standings (155), the very screens it opens
+   from. This has to outrank their inline z-index too. */
+.overlay-screen.dialog-scrim {
+  z-index: 220;
+}
+
+/* Deliberately NOT a .utility-card: that class carries a `padding: 16px !important`
+   override which no specificity can beat, which is what was crushing this dialog. Owning
+   the surface here keeps the padding ours. */
+.dialog-card {
+  width: calc(100% - 40px); /* never let the card touch the screen edge on a phone */
+  max-width: 360px;
+  padding: 28px 24px 24px;
+  text-align: center;
+  background-color: var(--canvas);
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+  border-radius: var(--rounded-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.24);
+  transition: background-color 300ms ease, border-color 300ms ease, color 300ms ease;
+}
+
+/* Tight leading: .display-md's 1.47 is tuned for the full-screen penalty takeover, and at
+   34px it wraps a one-line title in ~16px of dead space (§15).
+   Scoped through .dialog-card on purpose — .display-md is declared further down this file,
+   so a bare .dialog-title ties on specificity and loses on order. */
+.dialog-card .dialog-title {
+  line-height: 1.15;
+}
+
+/* Title and message are one thought — proximity should say so (§16 grouping) */
+.dialog-body {
+  margin-top: 10px;
+  line-height: 1.45;
+  color: var(--body-muted);
+}
+
+/* ...and the decision is a separate one, so it gets real air above it */
+.dialog-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.button-danger {
+  background-color: var(--danger);
+  color: hsl(0, 0%, 100%);
+  font-family: var(--font-text);
+  font-size: 16px;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--rounded-pill);
+  padding: 12px 22px;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), filter 200ms ease;
+  will-change: transform;
+}
+
+.button-danger:active {
+  transform: scale(0.96);
+}
+
+.button-ghost {
+  background-color: transparent;
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: 16px;
+  font-weight: 600;
+  border: 1px solid var(--hairline);
+  border-radius: var(--rounded-pill);
+  padding: 12px 22px;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), background-color 200ms ease;
+  will-change: transform;
+}
+
+.button-ghost:active {
+  transform: scale(0.96);
+}
+
+@media (hover: hover) {
+  .button-danger:hover {
+    filter: brightness(1.08);
+  }
+
+  .button-ghost:hover {
+    background-color: var(--surface-tile-3);
+  }
 }
 
 
@@ -847,6 +1017,12 @@ body.viewport-locked {
   animation: shake 0.4s cubic-bezier(.36, .07, .19, .97) both;
   color: var(--danger) !important;
   border-color: var(--danger) !important;
+}
+
+/* Placeholders carry the failure reason, so they must read as an error too */
+.input-error::placeholder {
+  color: var(--danger) !important;
+  opacity: 0.9;
 }
 
 /* --- BUTTONS --- */
@@ -1484,8 +1660,11 @@ body.viewport-locked {
     padding: 8px 16px;
   }
 
-  /* Hide sticky bottom bar on very short screens (e.g. keyboard active) */
-  @media (max-height: 480px) {
+  /* Hide sticky bottom bar on very short screens (e.g. keyboard active).
+     The width condition is load-bearing: a stray brace at line 1593 closes the enclosing
+     mobile query early, so without it this is a top-level rule and ANY short desktop
+     window loses the bar — and with it the Lock In Early button. */
+  @media (max-width: 768px) and (max-height: 480px) {
     .floating-sticky-bar {
       display: none !important;
     }
@@ -1524,4 +1703,252 @@ body.viewport-locked {
   #screen-game .global-nav {
     padding-right: 48px !important; /* Prevent overlap with round counter */
   }
-}
+}
+/* ==========================================================================
+   ACCESSIBILITY PREFERENCES  (apple-design §14)
+   Reduced motion is not "no feedback": slides, springs and overshoot go, while
+   the opacity and colour changes that actually carry meaning stay.
+   ========================================================================== */
+
+@keyframes popFade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  /* Overlays cross-fade rather than scaling in */
+  .overlay-screen {
+    transform: none;
+    transition: opacity 200ms ease;
+  }
+
+  .overlay-screen.active {
+    transform: none;
+  }
+
+  /* Entrance choreography: arrive in place instead of flying in */
+  .lobby-player-item,
+  .draft-item {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .hidden-step {
+    transform: none;
+    transition: opacity 200ms ease;
+  }
+
+  /* Elastic overshoot is precisely what this preference is asking us to drop */
+  .animate-pop {
+    animation: popFade 200ms ease-out forwards;
+  }
+
+  /* The shake goes; the red stays — colour is the real error signal */
+  .input-error {
+    animation: none;
+  }
+
+  .send-btn.sending svg {
+    animation: none;
+  }
+
+  /* The toast materialises in place */
+  .bot-toast,
+  .bot-toast.visible {
+    transform: none;
+  }
+
+  /* The switch still reports its state, just without the travel */
+  .ai-switch-thumb {
+    transition: none;
+  }
+
+  /* Press feedback stays (§1) — it is direct, tiny and non-vestibular — but the
+     decorative lift on hover goes. */
+  .tile {
+    transition: background-color 200ms ease, border-color 200ms ease, color 200ms ease;
+  }
+}
+
+/* Frost the translucent chrome instead of blurring it (§14) */
+@media (prefers-reduced-transparency: reduce) {
+
+  .floating-sticky-bar {
+    background-color: var(--canvas);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .dialog-scrim {
+    background-color: rgba(0, 0, 0, 0.82);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+/* Near-solid surfaces with defined borders (§14) */
+@media (prefers-contrast: more) {
+
+  .dialog-card,
+  .utility-card {
+    border-color: var(--ink);
+  }
+
+  .floating-sticky-bar {
+    background-color: var(--canvas);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-top-color: var(--ink);
+  }
+}
+
+/* ==========================================================================
+   GUIDED TUTORIAL + RULES RECAP
+   ========================================================================== */
+
+/* "Are you still playing?" nudge on the results screen */
+.idle-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--primary);
+  border-radius: var(--rounded-pill);
+  background-color: rgba(0, 102, 204, 0.05);
+  text-align: center;
+}
+
+.idle-prompt-btn {
+  padding: 8px 16px;
+  font-size: 14px;
+}
+
+.recap-list {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+
+.recap-list li {
+  position: relative;
+  padding-left: 18px;
+  font-family: var(--font-text);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--body-muted);
+}
+
+.recap-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--primary);
+}
+
+.recap-list strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.recap-example {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+/* --- COACH MARKS ---
+   The layer itself never eats pointer events: the typing step needs the real input to
+   stay reachable underneath. Only the tip re-enables them for its own buttons. */
+.coach-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 240;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 200ms var(--ease-out), visibility 200ms;
+}
+
+.coach-layer.active {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* The dimming is the spotlight's own shadow, so the cutout tracks the target exactly */
+.coach-spotlight {
+  position: absolute;
+  border-radius: var(--rounded-lg);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
+  border: 2px solid var(--primary);
+  pointer-events: none;
+  transition: top 300ms var(--ease-out), left 300ms var(--ease-out),
+              width 300ms var(--ease-out), height 300ms var(--ease-out);
+}
+
+.coach-tip {
+  position: absolute;
+  width: 290px;
+  max-width: calc(100vw - 32px);
+  padding: 16px;
+  background-color: var(--canvas);
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+  border-radius: var(--rounded-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  pointer-events: auto;
+  transition: top 300ms var(--ease-out), left 300ms var(--ease-out);
+}
+
+.coach-count {
+  color: var(--primary);
+  letter-spacing: 0.5px;
+}
+
+.coach-title {
+  margin-top: 4px;
+  line-height: 1.2;
+}
+
+.coach-text {
+  margin-top: 6px;
+  line-height: 1.45;
+  color: var(--body-muted);
+}
+
+.coach-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.coach-next {
+  font-size: 15px;
+  padding: 8px 18px;
+}
+
+/* Waiting on the learner to type — the tip must not offer a way past it */
+.coach-next.hidden {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coach-spotlight,
+  .coach-tip {
+    transition: none;
+  }
+}

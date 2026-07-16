@@ -36,36 +36,16 @@ let myRoomCode = '';
 let myPlayerName = '';
 // Host-specific memory for collision checking
 let hostSubmissions = {};
+let roundFinalized = false;
+let finalizeWatchdog = null;
 let activePlayersList = []; // Kept in sync via presence
-// Add these to your DOM Elements section at the top
-const screenTutorial = document.getElementById('screenTutorial');
-const btnOpenTutorial = document.getElementById('btnOpenTutorial'); // Assuming you added this button
-const btnCloseTutorial = document.getElementById('btnCloseTutorial');
-const tutorialSteps = document.querySelectorAll('.hidden-step');
+const btnOpenTutorial = document.getElementById('btnOpenTutorial');
 
-// --- TUTORIAL LOGIC ---
-// --- TUTORIAL LOGIC ---
+// The old 4-card popup is gone; "How to Play" now runs the guided tutorial defined further
+// down, which teaches on the real game chassis instead of describing it.
 btnOpenTutorial.addEventListener('click', (e) => {
     e.preventDefault(); // <--- This violently stops any accidental form submissions!
-
-    // Hide the boot/lobby screen and show the tutorial
-    hideOverlay(screenBoot);
-    showOverlay(screenTutorial);
-
-    // Reset all steps to hidden just in case they opened it before
-    tutorialSteps.forEach(step => step.classList.remove('animate-step'));
-
-    // Cascade the animations with a 60ms delay between each step
-    tutorialSteps.forEach((step, index) => {
-        setTimeout(() => {
-            step.classList.add('animate-step');
-        }, index * 60);
-    });
-});
-
-btnCloseTutorial.addEventListener('click', () => {
-    hideOverlay(screenTutorial);
-    showOverlay(screenBoot); // Send them back to the main screen
+    startTutorial();
 });
 // --- LOCAL GAME STATE ---
 const letterBag = [
@@ -79,6 +59,7 @@ const letterBag = [
 
 let timeLeft = 60;
 let timerInterval = null;
+let countdownInterval = null;
 let draftedWords = [];
 let boardLetters = [];
 let isPlaying = false;
@@ -101,7 +82,11 @@ function clearGameStateFromSession() {
     sessionStorage.removeItem('wordperfect_max_rounds');
     sessionStorage.removeItem('wordperfect_seconds_per_round');
     sessionStorage.removeItem('wordperfect_time_left');
-    
+    // Every caller here is starting a fresh game, so the carried score must go too —
+    // otherwise a refresh after "Play Again" restores the previous game's total.
+    sessionStorage.removeItem('wordperfect_total_score');
+    sessionStorage.removeItem('wordperfect_total_words');
+
     // Clear draft words for all rounds
     for (let i = 0; i < sessionStorage.length; i++) {
         const key = sessionStorage.key(i);
@@ -169,6 +154,8 @@ const joinErrorMsg = document.getElementById('join-error-msg');
 const btnReadyUp = document.getElementById('btn-ready-up');
 const btnStandingsReady = document.getElementById('btn-standings-ready');
 const countdownTimer = document.getElementById('countdown-timer');
+const countdownRound = document.getElementById('countdown-round');
+const standingsTitle = document.getElementById('standings-title');
 const displayRoomCode = document.getElementById('display-room-code');
 const lobbyPlayerList = document.getElementById('lobby-player-list');
 const btnNextRound = document.getElementById('btn-next-round');
@@ -177,6 +164,10 @@ const btnStandingsViewWords = document.getElementById('btn-standings-view-words'
 const btnCopyLink = document.getElementById('btn-copy-link');
 // (Removed the dead btnStandingsToLobby reference here)
 const resultsList = document.getElementById('results-list');
+const idlePrompt = document.getElementById('results-idle-prompt');
+const btnIdleRefresher = document.getElementById('btn-idle-refresher');
+const rulesRecapModal = document.getElementById('rules-recap-modal');
+const btnCloseRecap = document.getElementById('btn-close-recap');
 const standingsList = document.getElementById('standings-list');
 const resultsTitle = document.getElementById('results-title');
 const winnerList = document.getElementById('winner-list');
@@ -187,6 +178,95 @@ const penTimerEl = document.getElementById('penalty-timer');
 
 function showOverlay(element) { element.classList.add('active'); }
 function hideOverlay(element) { element.classList.remove('active'); }
+
+// Read live rather than cached: the preference can change mid-session (apple-design §14)
+function prefersReducedMotion() {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// --- JOIN VALIDATION ---
+// Supabase has no room registry: subscribing to a channel for a made-up code succeeds
+// and leaves you alone in an empty room forever. A host's presence is the only proof
+// the room is real, so guests stay on the boot screen until one shows up.
+let awaitingHostConfirm = false;
+let roomProbeTimer = null;
+const ROOM_PROBE_MS = 3000;
+
+function showJoinStatus(msg, isError) {
+    joinErrorMsg.textContent = msg;
+    joinErrorMsg.classList.toggle('text-danger', isError);
+    joinErrorMsg.classList.toggle('text-muted', !isError);
+    joinErrorMsg.classList.remove('hidden');
+}
+
+function hideJoinStatus() {
+    joinErrorMsg.classList.add('hidden');
+}
+
+function setJoinBusy(busy) {
+    btnJoinRoom.disabled = busy;
+    btnCreateRoom.disabled = busy;
+}
+
+// --- NAME UNIQUENESS ---
+// Scoring attributes each word to its author by NAME, so two players sharing one in the same
+// room silently merge their submissions: the collision rule stops firing between them and
+// the points all land on whoever the lookup finds first. Names must be unique per room.
+const NAME_TAKEN_MSG = 'That name is already taken in this room. Pick another.';
+
+function nameKey(name) {
+    return (name || '').trim().toUpperCase();
+}
+
+function findNameClash(players, name, excludeId) {
+    const key = nameKey(name);
+    return players.find(p => p.id !== excludeId && nameKey(p.name) === key);
+}
+
+// Two guests can clear the join check at the same instant, before either shows up in the
+// other's presence. Both then re-evaluate here against the same roster, so the rule has to
+// be deterministic and pick exactly one loser. The host owns the room and never yields;
+// bots are the host's, so they don't yield to guests either; otherwise lowest id wins.
+function enforceNameUniqueness() {
+    if (isHost || awaitingHostConfirm || !roomChannel) return;
+
+    const clash = findNameClash(activePlayersList, myPlayerName, myPlayerId);
+    if (!clash) return;
+
+    if (clash.isHost || clash.isAi || String(clash.id) < String(myPlayerId)) {
+        failJoin(NAME_TAKEN_MSG, inputPlayerName, 'TAKEN');
+    }
+}
+
+function revealRoom() {
+    hideOverlay(screenBoot);
+    if (isPlaying) {
+        hideOverlay(screenLobby);
+        initRound(timeLeft);
+    } else {
+        showOverlay(screenLobby);
+    }
+}
+
+function confirmRoomExists() {
+    if (!awaitingHostConfirm) return;
+    awaitingHostConfirm = false;
+    clearTimeout(roomProbeTimer);
+    roomProbeTimer = null;
+    setJoinBusy(false);
+    hideJoinStatus();
+    revealRoom();
+}
+
+async function failJoin(message, field = inputRoomCode, hint = 'NO ROOM') {
+    awaitingHostConfirm = false;
+    clearTimeout(roomProbeTimer);
+    roomProbeTimer = null;
+    await leaveRoomAndGoHome(); // tears the channel down and returns to boot
+    // Keep what they typed: it is likely nearly right and only needs an edit
+    flashFieldError(field, hint, 1600, { keepValue: true });
+    showJoinStatus(message, true);
+}
 
 // --- BOOT SEQUENCE ---
 async function bootEngine() {
@@ -394,17 +474,13 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             }
         }
 
-        // Show/hide play with bot suggestion toast
-        const isSingleRealPlayer = activePlayersList.filter(p => !p.isAi).length === 1;
-        const hasAi = activePlayersList.some(p => p.isAi);
+        // A lone host gets a bot automatically; the toggle stays visible so they can opt out
+        const realPlayerCount = activePlayersList.filter(p => !p.isAi).length;
         const aiToastEl = document.getElementById('ai-toast');
         if (aiToastEl) {
-            if (isHost && isSingleRealPlayer && !hasAi && !isAiRejected) {
-                aiToastEl.classList.add('visible');
-            } else {
-                aiToastEl.classList.remove('visible');
-            }
+            aiToastEl.classList.toggle('visible', isHost && realPlayerCount === 1 && !isPlaying);
         }
+        reconcileBots(realPlayerCount);
 
         renderLobbyPlayers(activePlayersList);
         if (screenStandings.classList.contains('active')) {
@@ -420,6 +496,21 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                 startGameAsHost();
             }
         }
+
+        // A host in presence is the proof we were waiting for. The roster it brings is also
+        // the first chance to see whether our name is already spoken for.
+        if (awaitingHostConfirm && activePlayersList.some(p => p.isHost)) {
+            if (findNameClash(activePlayersList, myPlayerName, myPlayerId)) {
+                failJoin(NAME_TAKEN_MSG, inputPlayerName, 'TAKEN');
+            } else {
+                confirmRoomExists();
+            }
+        } else {
+            enforceNameUniqueness();
+        }
+
+        // Someone leaving can be the event that completes the round
+        maybeFinalizeRound();
     };
     // FIX: Bind to all three events to guarantee we don't miss any updates
     roomChannel.on('presence', { event: 'sync' }, handlePresenceUpdate);
@@ -509,12 +600,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         roomChannel.on('broadcast', { event: 'submit_words' }, (response) => {
             const data = response.playerId ? response : response.payload;
             hostSubmissions[data.playerId] = data.words;
-
-            // If we have received words from everyone in the room (excluding bots)
-            const realPlayersCount = activePlayersList.filter(p => !p.isAi).length;
-            if (Object.keys(hostSubmissions).length === realPlayersCount) {
-                calculateScoresAndBroadcast();
-            }
+            maybeFinalizeRound();
         });
     }
 
@@ -523,6 +609,10 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
         hideOverlay(screenCountdown);
         showOverlay(screenResults);
+
+        // draftedWords still holds this round's finds (initRound clears it for the next
+        // one), so an empty list means they sat the round out.
+        idlePrompt.classList.toggle('hidden', draftedWords.length > 0);
 
         isReady = false;
         resetReadyButtons();
@@ -586,6 +676,10 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         myTotalScore = 0;
         myTotalWords = 0;
         isReady = false;
+        // Bots now carry their score between rounds, so a new game has to clear it too
+        myLocalAiPlayers = myLocalAiPlayers.map(bot => ({
+            ...bot, score: 0, totalWords: 0, updatedAt: Date.now()
+        }));
         resetReadyButtons();
         updateLobbyRoundText();
 
@@ -610,17 +704,29 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                 lobbyInputTime.disabled = true;
             }
 
+            // isHost is settled by now, so the ready button can claim its real label
+            resetReadyButtons();
+            syncAiSwitch();
+
             await syncMyState();
             displayRoomCode.textContent = myRoomCode;
             navRoomDisplay.textContent = `Room: ${myRoomCode}`;
             updateLobbyRoundText();
-            hideOverlay(screenBoot);
-            
-            if (isPlaying) {
-                hideOverlay(screenLobby);
-                initRound(timeLeft);
+
+            if (isHost || isPlaying) {
+                // The host IS the room, and a mid-game rejoin was already in it — restoring
+                // from session is proof enough. Probing here would risk kicking a player out
+                // of a live round just because presence was slow.
+                revealRoom();
             } else {
-                showOverlay(screenLobby);
+                // Stay on the boot screen until the host's presence proves this room is real
+                awaitingHostConfirm = true;
+                setJoinBusy(true);
+                showJoinStatus('Looking for that room...', false);
+                clearTimeout(roomProbeTimer);
+                roomProbeTimer = setTimeout(() => {
+                    failJoin('No room with that code. Check it and try again.');
+                }, ROOM_PROBE_MS);
             }
 
             // Always broadcast request_sync to ensure alignment with Host or catch up
@@ -644,6 +750,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 async function startGameAsHost() {
     isPlaying = true; // FIX: Lock the game state so this doesn't double-fire
     hostSubmissions = {};
+    roundFinalized = false;
     const newBoard = [];
     for (let i = 0; i < 16; i++) {
         newBoard.push(letterBag[Math.floor(Math.random() * letterBag.length)]);
@@ -667,6 +774,31 @@ function getAllValidBoardWords() {
         }
     }
     return validWords;
+}
+
+// A round ends when everyone still in the room has reported. This must be re-checked on
+// presence changes, not just on submission: if a player drops after the others have
+// already submitted, no further submit_words ever arrives and the round hangs forever.
+function maybeFinalizeRound() {
+    if (!isHost || roundFinalized) return;
+
+    const realPlayers = activePlayersList.filter(p => !p.isAi);
+    if (realPlayers.length === 0) return;
+
+    // Submissions from players who have since left must not count toward the total,
+    // or a leaver's stale entry could satisfy the check on someone else's behalf.
+    const present = new Set(realPlayers.map(p => p.id));
+    const received = Object.keys(hostSubmissions).filter(id => present.has(id));
+
+    if (received.length >= realPlayers.length) finalizeRound();
+}
+
+function finalizeRound() {
+    if (!isHost || roundFinalized) return;
+    roundFinalized = true; // one scoring pass per round, whichever trigger gets here first
+    clearTimeout(finalizeWatchdog);
+    finalizeWatchdog = null;
+    calculateScoresAndBroadcast();
 }
 
 async function calculateScoresAndBroadcast() {
@@ -740,6 +872,15 @@ async function calculateScoresAndBroadcast() {
     results.sort((a, b) => a.isDuplicate - b.isDuplicate);
     const isGameOver = currentRound >= maxRounds;
 
+    // Real players each persist their own score and re-publish it via presence, but
+    // nobody owns the bots except us — without this write-back the next presence sync
+    // re-publishes them at their pre-round score and the points vanish.
+    myLocalAiPlayers = myLocalAiPlayers.map(bot => {
+        const scored = tempPlayers.find(p => p.id === bot.id);
+        if (!scored) return bot;
+        return { ...bot, score: scored.score, totalWords: scored.totalWords || 0, updatedAt: Date.now() };
+    });
+
     await roomChannel.send({
         type: 'broadcast',
         event: 'round_results',
@@ -754,7 +895,8 @@ async function calculateScoresAndBroadcast() {
 
 
 let myLocalAiPlayers = [];
-let isAiRejected = false;
+// Host-only: whether a bot should fill in while the host waits alone
+let aiEnabled = true;
 
 const soccerPlayers = [
     "Messi", "Ronaldo", "Neymar", "Mbappe", "Haaland", 
@@ -773,13 +915,56 @@ function getRandomAiName() {
     return `${baseName}_${Math.floor(10 + Math.random() * 90)}`;
 }
 
+function createBot() {
+    return {
+        id: 'ai-' + Math.random().toString(36).substring(2),
+        name: getRandomAiName(),
+        isReady: true,
+        score: 0,
+        totalWords: 0,
+        difficulty: 'Medium',
+        isAi: true,
+        updatedAt: Date.now()
+    };
+}
+
+// A bot only exists to keep a lone host company: it joins automatically and steps
+// aside as soon as a second real player arrives. Host-authoritative, since bots
+// live in the host's presence payload.
+async function reconcileBots(realPlayerCount) {
+    if (!isHost || isPlaying) return;
+
+    const hasBot = myLocalAiPlayers.length > 0;
+
+    if (realPlayerCount >= 2 && hasBot) {
+        myLocalAiPlayers = [];
+        await syncMyState();
+    } else if (realPlayerCount === 1 && !hasBot && aiEnabled) {
+        myLocalAiPlayers = [createBot()];
+        await syncMyState();
+    }
+}
+
 async function leaveRoomAndGoHome() {
     console.log("Leaving room and cleaning up state...");
     
-    if (timerInterval) {
-        clearInterval(timerInterval);
-        timerInterval = null;
-    }
+    // Every timer has to die here. A survivor fires against a torn-down room:
+    // the countdown would start a phantom round, and endRound() would then hit
+    // roomChannel after it has been nulled.
+    clearInterval(timerInterval);
+    timerInterval = null;
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+    clearInterval(penaltyInterval);
+    penaltyInterval = null;
+    penaltyActive = false;
+    clearTimeout(finalizeWatchdog);
+    finalizeWatchdog = null;
+    clearTimeout(roomProbeTimer);
+    roomProbeTimer = null;
+    awaitingHostConfirm = false;
+    setJoinBusy(false);
+    document.body.classList.remove('counting-down', 'penalized');
 
     if (roomChannel) {
         try {
@@ -807,7 +992,7 @@ async function leaveRoomAndGoHome() {
     myTotalScore = 0;
     myTotalWords = 0;
     myLocalAiPlayers = [];
-    isAiRejected = false;
+    aiEnabled = true;
     isReady = false;
     isHost = false;
 
@@ -819,6 +1004,7 @@ async function leaveRoomAndGoHome() {
     sessionStorage.removeItem('wordperfect_total_words');
 
     resetReadyButtons();
+    syncAiSwitch();
     totalScoreDisplay.textContent = `Total: 0 pts`;
     roundScoreDisplay.textContent = `Drafted: 0 words`;
     displayRoomCode.textContent = '----';
@@ -827,9 +1013,10 @@ async function leaveRoomAndGoHome() {
     roundIndicator.textContent = 'Round 1';
 
     const overlays = [
-        screenLobby, screenCountdown, screenResults, 
-        screenStandings, screenWinner, screenTutorial, 
-        penaltyModal
+        screenLobby, screenCountdown, screenResults,
+        screenStandings, screenWinner, penaltyModal,
+        document.getElementById('confirm-leave-modal'),
+        document.getElementById('rules-recap-modal')
     ];
     overlays.forEach(o => {
         if (o) hideOverlay(o);
@@ -839,14 +1026,32 @@ async function leaveRoomAndGoHome() {
 }
 
 // --- UI EVENT LISTENERS ---
+[inputPlayerName, inputRoomCode, wordInput].forEach(el => {
+    el.addEventListener('input', () => clearFieldError(el));
+});
+
+// Validates the name field in place, returning false once it has flagged itself
+function hasValidName() {
+    const name = inputPlayerName.value.trim();
+    if (name.length === 0) {
+        flashFieldError(inputPlayerName, 'Enter your name here');
+        return false;
+    }
+    if (name.length < 2) {
+        flashFieldError(inputPlayerName, 'Name needs 2+ letters');
+        return false;
+    }
+    return true;
+}
+
 btnCreateRoom.addEventListener('click', async () => {
-    myPlayerName = inputPlayerName.value.trim();
     maxRounds = 3; // Default starting rounds
     secondsPerRound = 60; // Default starting round duration
-    if (myPlayerName.length < 2) return alert("Enter a valid name.");
+    if (!hasValidName()) return;
+    myPlayerName = inputPlayerName.value.trim();
 
     myLocalAiPlayers = [];
-    isAiRejected = false;
+    aiEnabled = true;
 
     // Pre-initialize lobby setting displays for the Host
     lobbyInputRounds.value = maxRounds;
@@ -864,13 +1069,22 @@ btnCreateRoom.addEventListener('click', async () => {
 });
 
 btnJoinRoom.addEventListener('click', async () => {
-    myPlayerName = inputPlayerName.value.trim();
-    const code = inputRoomCode.value.trim().toUpperCase();
-    if (myPlayerName.length < 2) return alert("Enter a valid name.");
-    if (code.length !== 4) return alert("Room code must be 4 letters.");
+    hideJoinStatus();
+    if (!hasValidName()) return;
 
+    const code = inputRoomCode.value.trim().toUpperCase();
+    if (code.length === 0) {
+        flashFieldError(inputRoomCode, 'CODE?');
+        return;
+    }
+    if (code.length !== 4) {
+        flashFieldError(inputRoomCode, '4 LETTERS');
+        return;
+    }
+
+    myPlayerName = inputPlayerName.value.trim();
     myLocalAiPlayers = [];
-    isAiRejected = false;
+    aiEnabled = true;
     clearGameStateFromSession();
 
     await joinRealtimeRoom(code, myPlayerName, false);
@@ -879,7 +1093,7 @@ btnJoinRoom.addEventListener('click', async () => {
 btnReadyUp.addEventListener('click', async () => {
     isReady = !isReady;
     btnReadyUp.style.backgroundColor = isReady ? 'var(--surface-black)' : 'var(--primary)';
-    btnReadyUp.textContent = isReady ? 'Waiting for others...' : 'Ready Up';
+    btnReadyUp.textContent = isReady ? 'Waiting for others...' : lobbyReadyLabel();
     await syncMyState();
 });
 
@@ -940,8 +1154,26 @@ btnPlayAgain.addEventListener('click', async () => {
     }
 });
 
+// Fisher-Yates, then repaint the faces. Split out so the reduced-motion path can shuffle
+// without the fly-to-centre choreography.
+function applyShuffle() {
+    for (let i = boardLetters.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [boardLetters[i], boardLetters[j]] = [boardLetters[j], boardLetters[i]];
+    }
+    tiles.forEach((tile, index) => {
+        tile.textContent = boardLetters[index];
+    });
+}
+
 btnShuffle.addEventListener('click', () => {
     if (!isPlaying) return;
+
+    // The board still shuffles — it just doesn't perform (§14)
+    if (prefersReducedMotion()) {
+        applyShuffle();
+        return;
+    }
 
     const board = document.getElementById('board');
     const boardRect = board.getBoundingClientRect();
@@ -967,16 +1199,7 @@ btnShuffle.addEventListener('click', () => {
     });
 
     setTimeout(() => {
-        // Fisher-Yates shuffle algorithm
-        for (let i = boardLetters.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [boardLetters[i], boardLetters[j]] = [boardLetters[j], boardLetters[i]];
-        }
-
-        // Update tile UI text
-        tiles.forEach((tile, index) => {
-            tile.textContent = boardLetters[index];
-        });
+        applyShuffle();
 
         // Phase 2: Animate back to original grid positions and fade/scale in springily
         tiles.forEach(tile => {
@@ -999,9 +1222,15 @@ btnShuffle.addEventListener('click', () => {
 });
 
 // --- RENDER HELPERS ---
+// The host's click still just flips their own ready flag — the game auto-starts once
+// everyone is ready — but the label frames it as the host's call to make.
+function lobbyReadyLabel() {
+    return isHost ? 'Start Game' : 'Ready to Play';
+}
+
 function resetReadyButtons() {
     btnReadyUp.style.backgroundColor = 'var(--primary)';
-    btnReadyUp.textContent = 'Ready Up';
+    btnReadyUp.textContent = lobbyReadyLabel();
     btnStandingsReady.style.backgroundColor = 'var(--primary)';
     btnStandingsReady.textContent = 'Ready for Next Round';
 }
@@ -1088,6 +1317,9 @@ function renderLobbyPlayers(players) {
                 const aiId = btn.getAttribute('data-ai-id');
                 console.log("Removing bot with ID:", aiId);
                 myLocalAiPlayers = myLocalAiPlayers.filter(bot => bot.id !== aiId);
+                // Dismissing the bot means opting out, or auto-join would bring it straight back
+                aiEnabled = false;
+                syncAiSwitch();
                 await syncMyState();
             });
         });
@@ -1095,6 +1327,9 @@ function renderLobbyPlayers(players) {
 }
 
 function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? currentRound - 1 : 1) {
+    // Name the round these points came from rather than a generic "Current Standings"
+    if (standingsTitle) standingsTitle.textContent = `Round ${roundsPlayed} of ${maxRounds}`;
+
     const sorted = [...players].sort((a, b) => b.score - a.score);
     standingsList.innerHTML = '';
 
@@ -1253,7 +1488,12 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
 
 // --- COUNTDOWN SEQUENCE ---
 function startCountdown() {
+    // Held at module scope so leaving the room can cancel a countdown in flight —
+    // otherwise it fires initRound() on a player who has already gone home.
+    clearInterval(countdownInterval);
+
     document.body.classList.add('counting-down');
+    if (countdownRound) countdownRound.textContent = `ROUND ${currentRound} OF ${maxRounds}`;
     showOverlay(screenCountdown);
     let count = 5;
     countdownTimer.textContent = count;
@@ -1262,7 +1502,7 @@ function startCountdown() {
     void countdownTimer.offsetWidth;
     countdownTimer.classList.add('animate-pop');
 
-    const countInt = setInterval(() => {
+    countdownInterval = setInterval(() => {
         count--;
         if (count > 0) {
             countdownTimer.textContent = count;
@@ -1270,7 +1510,8 @@ function startCountdown() {
             void countdownTimer.offsetWidth;
             countdownTimer.classList.add('animate-pop');
         } else {
-            clearInterval(countInt);
+            clearInterval(countdownInterval);
+            countdownInterval = null;
             document.body.classList.remove('counting-down');
             hideOverlay(screenCountdown);
             initRound();
@@ -1278,7 +1519,274 @@ function startCountdown() {
     }, 1000);
 }
 
-// --- CORE LOOP ---
+// ============================================================================
+// GUIDED TUTORIAL
+// Runs on the real game chassis with the network untouched: no room, no channel, no
+// session writes. isTutorial gates every path that would otherwise reach for roomChannel.
+// ============================================================================
+
+let isTutorial = false;
+let coachStep = 0;
+let coachOnFinalStep = false;
+
+// Hand-picked so the hint words are guaranteed to be spellable from the pool.
+// RAIN, STAIN, TRAIN, BRAIN, GRAIN, CLIMB... all live in here.
+const TUTORIAL_BOARD = ['R', 'A', 'I', 'N', 'S', 'T', 'B', 'E', 'L', 'O', 'C', 'D', 'M', 'P', 'U', 'G'];
+const TUTORIAL_BOT = 'Messi_42';
+const TUTORIAL_HINT = 'RAIN';
+
+const coachLayer = document.getElementById('coach-layer');
+const coachSpotlight = document.getElementById('coach-spotlight');
+const coachTip = document.getElementById('coach-tip');
+const coachCount = document.getElementById('coach-count');
+const coachTitle = document.getElementById('coach-title');
+const coachText = document.getElementById('coach-text');
+const btnCoachNext = document.getElementById('btn-coach-next');
+const btnCoachSkip = document.getElementById('btn-coach-skip');
+
+const COACH_STEPS = [
+    {
+        target: '#board',
+        title: 'The board',
+        text: 'Every player gets these same 16 letters. Build words out of them — each letter can only be used as often as it appears here.'
+    },
+    {
+        target: '.timer-block',
+        title: 'The clock',
+        text: 'A round lasts 60 seconds. It is paused right now so you can take your time reading.'
+    },
+    {
+        target: '.input-cluster',
+        title: 'Find your first word',
+        text: `Words need at least 4 letters. Type ${TUTORIAL_HINT} — or tap the letters on the board — then press the arrow.`,
+        hint: TUTORIAL_HINT,
+        awaitWord: true // no Next button: the learner advances by actually doing it
+    },
+    {
+        target: '.draft-container',
+        title: 'Your words land here',
+        text: 'Each word scores 1 point per letter, so longer finds pay more. No simple plurals though — RAINS would not count.'
+    },
+    {
+        target: '.floating-sticky-bar',
+        title: 'Your score',
+        text: 'Your running total for the game. "Lock In Early" ends your round before the clock does.'
+    }
+];
+
+function setCoachVisible(visible) {
+    coachLayer.classList.toggle('active', visible);
+}
+
+// Anchors the spotlight to the live element and parks the tip clear of it
+function positionCoach(target) {
+    const el = document.querySelector(target);
+    if (!el) return;
+
+    const r = el.getBoundingClientRect();
+    const pad = 8;
+    coachSpotlight.style.top = `${r.top - pad}px`;
+    coachSpotlight.style.left = `${r.left - pad}px`;
+    coachSpotlight.style.width = `${r.width + pad * 2}px`;
+    coachSpotlight.style.height = `${r.height + pad * 2}px`;
+
+    // Prefer below the target; flip above when there isn't room
+    const tipH = coachTip.offsetHeight || 160;
+    const tipW = coachTip.offsetWidth || 290;
+    let top = r.bottom + 16;
+    if (top + tipH > window.innerHeight - 8) top = Math.max(8, r.top - tipH - 16);
+
+    let left = r.left + r.width / 2 - tipW / 2;
+    left = Math.max(16, Math.min(left, window.innerWidth - tipW - 16));
+
+    coachTip.style.top = `${top}px`;
+    coachTip.style.left = `${left}px`;
+}
+
+function showCoachStep(i) {
+    coachStep = i;
+    const step = COACH_STEPS[i];
+    if (!step) return finishTutorialToDemo();
+
+    coachCount.textContent = `${i + 1} / ${COACH_STEPS.length + 1}`;
+    coachTitle.textContent = step.title;
+    coachText.textContent = step.text;
+
+    // On the do-it step there is no way forward except doing it
+    btnCoachNext.classList.toggle('hidden', !!step.awaitWord);
+
+    if (step.hint) {
+        wordInput.placeholder = `Try: ${step.hint}`;
+        wordInput.focus();
+    } else {
+        wordInput.placeholder = 'Type here...';
+    }
+
+    setCoachVisible(true);
+    positionCoach(step.target);
+    // Re-measure once the tip has its real height
+    requestAnimationFrame(() => positionCoach(step.target));
+}
+
+function startTutorial() {
+    isTutorial = true;
+    coachStep = 0;
+    // Reset the button the demo step repurposed, or a second run starts already "finished"
+    coachOnFinalStep = false;
+    btnCoachNext.textContent = 'Next';
+
+    hideOverlay(screenBoot);
+    hideJoinStatus();
+
+    // Dress the chassis as a believable round without touching the network or session
+    boardLetters = TUTORIAL_BOARD.slice();
+    draftedWords = [];
+    myTotalScore = 0;
+    myTotalWords = 0;
+    timeLeft = 60;
+    isPlaying = true; // lets the input and tiles respond; every network path checks isTutorial
+
+    navRoomDisplay.textContent = 'Room: DEMO';
+    navRoundDisplay.textContent = 'Tutorial';
+    roundIndicator.textContent = 'Tutorial';
+    timerDisplay.textContent = '01:00'; // deliberately never started
+    timerDisplay.style.color = 'var(--ink)';
+    totalScoreDisplay.textContent = 'Total: 0 pts';
+    roundScoreDisplay.textContent = 'Drafted: 0 words';
+    draftList.innerHTML = '';
+
+    initPhysics();
+    paintBoard();
+
+    wordInput.disabled = false;
+    wordInput.value = '';
+    sendBtn.disabled = true;
+    btnShuffle.disabled = true; // shuffling would invalidate the hint word
+
+    showCoachStep(0);
+}
+
+function endTutorial() {
+    isTutorial = false;
+    isPlaying = false;
+    setCoachVisible(false);
+
+    draftedWords = [];
+    boardLetters = [];
+    tiles.forEach(t => { t.textContent = ''; t.onclick = null; });
+    draftList.innerHTML = '';
+    wordInput.value = '';
+    wordInput.placeholder = 'Type here...';
+    wordInput.disabled = true;
+    sendBtn.disabled = true;
+
+    if (physicsAnimId) {
+        cancelAnimationFrame(physicsAnimId);
+        physicsAnimId = null;
+    }
+    if (typeof Matter !== 'undefined' && physicsEngine) {
+        Matter.World.clear(physicsWorld);
+        Matter.Engine.clear(physicsEngine);
+    }
+    physicsEngine = null;
+    physicsWorld = null;
+    physicsWordBodies = [];
+
+    navRoomDisplay.textContent = 'Room: ----';
+    navRoundDisplay.textContent = 'Round 1';
+    roundIndicator.textContent = 'Round 1';
+    totalScoreDisplay.textContent = 'Total: 0 pts';
+    roundScoreDisplay.textContent = 'Drafted: 0 words';
+
+    hideOverlay(screenResults);
+    showOverlay(screenBoot);
+}
+
+// The payoff: the learner's own word, cancelled by a bot that found the same thing.
+// Uses the real results screen so they also learn where results appear.
+function finishTutorialToDemo() {
+    setCoachVisible(false);
+
+    const mine = draftedWords[0] || TUTORIAL_HINT;
+    const demo = [
+        { word: mine, authors: ['You', TUTORIAL_BOT], isDuplicate: true, points: 0 },
+        { word: 'CLIMB', authors: [TUTORIAL_BOT], isDuplicate: false, points: 5 }
+    ];
+
+    resultsTitle.textContent = 'Tutorial Results';
+    resultsList.innerHTML = '';
+    demo.forEach(res => {
+        const li = document.createElement('li');
+        li.className = `result-row ${res.isDuplicate ? 'duplicate-word' : 'unique-word'}`;
+        li.innerHTML = `
+            <div style="display:flex; flex-direction:column;">
+                <span class="result-word">${res.word}</span>
+                <span class="caption result-authors">${res.authors.join(', ')}</span>
+            </div>
+            <span class="result-points">${res.isDuplicate ? 'CANCELLED' : `+${res.points} pts`}</span>
+        `;
+        resultsList.appendChild(li);
+    });
+
+    idlePrompt.classList.add('hidden');
+    btnNextRound.textContent = 'Finish tutorial';
+    btnNextRound.onclick = endTutorial;
+    showOverlay(screenResults);
+
+    // Coach the punchline over the real results screen
+    coachCount.textContent = `${COACH_STEPS.length + 1} / ${COACH_STEPS.length + 1}`;
+    coachTitle.textContent = 'The catch';
+    coachText.textContent = `${TUTORIAL_BOT} found ${mine} too — so it cancels and you both score zero. The whole game is finding words nobody else will.`;
+    coachOnFinalStep = true;
+    btnCoachNext.classList.remove('hidden');
+    btnCoachNext.textContent = 'Got it';
+
+    setCoachVisible(true);
+    requestAnimationFrame(() => positionCoach('#results-list'));
+}
+
+// Called when a word is accepted while the tutorial is waiting for one
+function tutorialWordAccepted() {
+    const step = COACH_STEPS[coachStep];
+    if (!step || !step.awaitWord) return;
+    wordInput.placeholder = 'Type here...';
+    setTimeout(() => showCoachStep(coachStep + 1), 450); // let them see the word land
+}
+
+if (btnCoachNext) {
+    btnCoachNext.addEventListener('click', () => {
+        if (coachOnFinalStep) endTutorial();
+        else showCoachStep(coachStep + 1);
+    });
+}
+if (btnCoachSkip) btnCoachSkip.addEventListener('click', endTutorial);
+
+// Coach marks are pinned to live rects, so they must follow the layout
+window.addEventListener('resize', () => {
+    if (!isTutorial || !coachLayer.classList.contains('active')) return;
+    const step = COACH_STEPS[coachStep];
+    positionCoach(step ? step.target : '#results-list');
+});
+
+// Paints the 16 faces and wires them to the input. Shared by a real round and the guided
+// tutorial so the tutorial teaches the actual board, not a replica of it.
+function paintBoard() {
+    tiles.forEach((tile, index) => {
+        const letter = boardLetters[index];
+        tile.textContent = letter;
+
+        tile.onclick = () => {
+            if (isPlaying) { // (Removed penaltyActive check here since we deleted it)
+                // Tiles mutate the value directly, so no 'input' event fires to clear this
+                clearFieldError(wordInput);
+                wordInput.value += letter;
+                sendBtn.disabled = wordInput.value.trim().length < 4;
+                wordInput.focus();
+            }
+        };
+    });
+}
+
 // --- CORE LOOP ---
 function initRound(syncedTime = null) {
     if (syncedTime !== null) {
@@ -1336,19 +1844,7 @@ function initRound(syncedTime = null) {
     wordInput.focus();
     timerDisplay.style.color = 'var(--ink)';
 
-    tiles.forEach((tile, index) => {
-        const letter = boardLetters[index];
-        tile.textContent = letter;
-
-        tile.onclick = () => {
-            if (isPlaying) { // (Removed penaltyActive check here since we deleted it)
-                wordInput.value += letter;
-                sendBtn.disabled = wordInput.value.trim().length < 4;
-                wordInput.focus();
-            }
-        };
-    });
-
+    paintBoard();
     startClock();
 }
 
@@ -1400,9 +1896,20 @@ async function endRound() {
         event: 'submit_words',
         payload: { playerId: myPlayerId, words: draftedWords }
     });
+
+    // Safety net: a client that freezes (backgrounded mobile tab) keeps its presence but
+    // never reports, so presence changes alone can't rescue the round. Close it anyway.
+    if (isHost) {
+        clearTimeout(finalizeWatchdog);
+        finalizeWatchdog = setTimeout(() => {
+            console.warn("Finalize watchdog fired - closing round without every submission.");
+            finalizeRound();
+        }, 10000);
+    }
 }
 
 actionBtn.addEventListener('click', () => {
+    if (isTutorial) return; // no round to lock in, and endRound() would hit a null channel
     if (isPlaying) endRound();
 });
 
@@ -1438,20 +1945,48 @@ function isPlural(word) {
     return false;
 }
 
+// Surfaces a failure reason inside the offending field itself: shake it, clear it,
+// and borrow the placeholder to say what went wrong.
+// keepValue leaves what the user typed intact — used when the entry may well be correct
+// and only the world is wrong (e.g. the room isn't there yet), so the reason has to be
+// carried by something other than the placeholder.
+function flashFieldError(inputEl, reason, duration = 1600, { keepValue = false } = {}) {
+    if (inputEl.errorTimer) {
+        clearTimeout(inputEl.errorTimer);
+    } else {
+        // Only capture on the first flash, otherwise we'd restore a stale error message
+        inputEl.dataset.restorePlaceholder = inputEl.placeholder;
+    }
+
+    // Re-trigger the shake animation even if it is already running
+    inputEl.classList.remove('input-error');
+    void inputEl.offsetWidth;
+    inputEl.classList.add('input-error');
+
+    if (!keepValue) inputEl.value = '';
+    inputEl.placeholder = reason;
+    inputEl.focus();
+
+    inputEl.errorTimer = setTimeout(() => {
+        inputEl.classList.remove('input-error');
+        inputEl.placeholder = inputEl.dataset.restorePlaceholder;
+        inputEl.errorTimer = null;
+    }, duration);
+}
+
+// Once the user starts fixing a field, its complaint is stale — drop it immediately
+// so a corrected field never sits there still flagged as wrong.
+function clearFieldError(inputEl) {
+    if (!inputEl.errorTimer) return;
+    clearTimeout(inputEl.errorTimer);
+    inputEl.errorTimer = null;
+    inputEl.classList.remove('input-error');
+    inputEl.placeholder = inputEl.dataset.restorePlaceholder;
+}
+
 function rejectInput(reason) {
-    wordInput.classList.add('input-error');
-    const oldPlaceholder = wordInput.placeholder;
-
-    // Show the user exactly why it failed in the input box
-    wordInput.value = '';
-    wordInput.placeholder = reason;
+    flashFieldError(wordInput, reason, 1000);
     sendBtn.disabled = true;
-
-    setTimeout(() => {
-        wordInput.classList.remove('input-error');
-        wordInput.placeholder = oldPlaceholder;
-        wordInput.focus();
-    }, 1000);
 }
 
 function attemptSubmitWord(rawWord) {
@@ -1486,6 +2021,7 @@ function attemptSubmitWord(rawWord) {
     }
 
     console.log("✅ Success! Adding to draft.");
+    clearFieldError(wordInput); // a win retires any complaint still on screen
     draftedWords.unshift(newWord);
 
     // Save update to sessionStorage
@@ -1542,12 +2078,14 @@ wordForm.addEventListener('submit', (e) => {
             sendBtn.classList.remove('sending');
         }, 400);
         wordInput.focus();
+        if (isTutorial) tutorialWordAccepted();
     }
 });
 // --- DRAFTING MECHANICS ---
 
 // --- HONEST FRICTION ---
 document.addEventListener("visibilitychange", () => {
+    if (isTutorial) return; // nobody to cheat against while learning
     if (!isPlaying) return;
     if (document.hidden) {
         clearInterval(penaltyInterval);
@@ -1595,7 +2133,20 @@ function initPhysics() {
         physicsAnimId = null;
     }
 
-    if (typeof Matter === 'undefined' || window.innerWidth <= 768) {
+    // Tumbling, bouncing words are a strong vestibular trigger, so reduced motion takes
+    // the same static list mobile already uses rather than a special case of its own.
+    if (typeof Matter === 'undefined' || window.innerWidth <= 768 || prefersReducedMotion()) {
+        // Drop any world left from a previous round. Without this, physicsWorld stays
+        // truthy and attemptSubmitWord() keeps feeding pills into a hidden canvas while
+        // the fallback list sits empty — reachable now that a preference can flip mid-game.
+        if (typeof Matter !== 'undefined' && physicsEngine) {
+            Matter.World.clear(physicsWorld);
+            Matter.Engine.clear(physicsEngine);
+        }
+        physicsEngine = null;
+        physicsWorld = null;
+        physicsWordBodies = [];
+
         // Hide canvas and show fallback DOM list
         canvas.classList.add('hidden');
         const fallbackList = document.getElementById('drafted-words');
@@ -1737,39 +2288,66 @@ const btnResultsHome = document.getElementById('btn-results-home');
 const btnStandingsHome = document.getElementById('btn-standings-home');
 const btnWinnerHome = document.getElementById('btn-winner-home');
 const navHomeBtn = document.getElementById('nav-home-btn');
+const confirmLeaveModal = document.getElementById('confirm-leave-modal');
+const btnConfirmLeave = document.getElementById('btn-confirm-leave');
+const btnCancelLeave = document.getElementById('btn-cancel-leave');
 
-if (btnLobbyHome) btnLobbyHome.addEventListener('click', leaveRoomAndGoHome);
-if (btnResultsHome) btnResultsHome.addEventListener('click', leaveRoomAndGoHome);
-if (btnStandingsHome) btnStandingsHome.addEventListener('click', leaveRoomAndGoHome);
-if (btnWinnerHome) btnWinnerHome.addEventListener('click', leaveRoomAndGoHome);
-if (navHomeBtn) navHomeBtn.addEventListener('click', leaveRoomAndGoHome);
-
-// Bind Bot Toast Actions
-const btnAddAi = document.getElementById('btn-add-ai');
-if (btnAddAi) {
-    btnAddAi.addEventListener('click', async () => {
-        if (!isHost) return;
-        const newBot = {
-            id: 'ai-' + Math.random().toString(36).substring(2),
-            name: getRandomAiName(),
-            isReady: true,
-            score: 0,
-            totalWords: 0,
-            difficulty: 'Medium',
-            isAi: true,
-            updatedAt: Date.now()
-        };
-        myLocalAiPlayers.push(newBot);
-        await syncMyState();
-    });
+// Walking out of a game in progress costs everyone the round, so make it deliberate.
+// The lobby and the Game Over screen have nothing left to lose, so they leave freely.
+function confirmLeaveGame() {
+    // Nothing is at stake in the tutorial, so friction here would just be nagging
+    if (isTutorial) {
+        endTutorial();
+        return;
+    }
+    showOverlay(confirmLeaveModal);
 }
 
-const btnRejectAi = document.getElementById('btn-reject-ai');
-if (btnRejectAi) {
-    btnRejectAi.addEventListener('click', () => {
-        isAiRejected = true;
-        const aiToastEl = document.getElementById('ai-toast');
-        if (aiToastEl) aiToastEl.classList.remove('visible');
+function dismissLeaveConfirm() {
+    hideOverlay(confirmLeaveModal);
+}
+
+if (btnConfirmLeave) {
+    btnConfirmLeave.addEventListener('click', async () => {
+        dismissLeaveConfirm();
+        await leaveRoomAndGoHome();
+    });
+}
+if (btnCancelLeave) btnCancelLeave.addEventListener('click', dismissLeaveConfirm);
+
+// The recap is deliberately read-only: it opens over the results screen and touches no
+// game state, so a player mid-game can check the rules without forfeiting anything.
+if (btnIdleRefresher) btnIdleRefresher.addEventListener('click', () => showOverlay(rulesRecapModal));
+if (btnCloseRecap) btnCloseRecap.addEventListener('click', () => hideOverlay(rulesRecapModal));
+
+// Leaves without friction
+if (btnLobbyHome) btnLobbyHome.addEventListener('click', leaveRoomAndGoHome);
+if (btnWinnerHome) btnWinnerHome.addEventListener('click', leaveRoomAndGoHome);
+
+// Leaves mid-game, so confirm first
+if (btnResultsHome) btnResultsHome.addEventListener('click', confirmLeaveGame);
+if (btnStandingsHome) btnStandingsHome.addEventListener('click', confirmLeaveGame);
+if (navHomeBtn) navHomeBtn.addEventListener('click', confirmLeaveGame);
+
+// Bind Bot Toggle
+const btnToggleAi = document.getElementById('btn-toggle-ai');
+
+function syncAiSwitch() {
+    if (btnToggleAi) btnToggleAi.setAttribute('aria-checked', aiEnabled ? 'true' : 'false');
+}
+
+if (btnToggleAi) {
+    btnToggleAi.addEventListener('click', async () => {
+        if (!isHost) return;
+        aiEnabled = !aiEnabled;
+        syncAiSwitch();
+
+        if (!aiEnabled) {
+            myLocalAiPlayers = [];
+            await syncMyState();
+        } else {
+            await reconcileBots(activePlayersList.filter(p => !p.isAi).length);
+        }
     });
 }
 
