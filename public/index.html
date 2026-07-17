@@ -360,6 +360,10 @@
         </div>
     </div>
 
+    <!-- Global toast stack: word-like notifications land here regardless of which screen
+         is currently active, since the author may already have moved on from Results. -->
+    <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
     <!-- SUPABASE CLIENT LIBRARY -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>

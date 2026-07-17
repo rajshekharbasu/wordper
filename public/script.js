@@ -74,6 +74,8 @@ function saveGameStateToSession() {
     sessionStorage.setItem('wordperfect_score_mode', scoreMode);
     sessionStorage.setItem('wordperfect_time_left', timeLeft.toString());
     sessionStorage.setItem('wordperfect_total_score', myTotalScore.toString());
+    sessionStorage.setItem('wordperfect_word_attempts', wordAttempts.toString());
+    sessionStorage.setItem('wordperfect_word_errors', wordErrors.toString());
 }
 
 function clearGameStateFromSession() {
@@ -88,6 +90,8 @@ function clearGameStateFromSession() {
     // otherwise a refresh after "Play Again" restores the previous game's total.
     sessionStorage.removeItem('wordperfect_total_score');
     sessionStorage.removeItem('wordperfect_total_words');
+    sessionStorage.removeItem('wordperfect_word_attempts');
+    sessionStorage.removeItem('wordperfect_word_errors');
 
     // Clear draft words for all rounds
     for (let i = 0; i < sessionStorage.length; i++) {
@@ -105,6 +109,10 @@ let physicsEngine = null;
 let physicsWorld = null;
 let physicsWordBodies = [];
 let physicsAnimId = null;
+let scorePopups = []; // non-physics particles: {x, y, text, bornAt} — drawn on top of pills
+
+const SCORE_POPUP_DELAY_MS = 600;
+const SCORE_POPUP_LIFETIME_MS = 900;
 
 let currentRound = 1;
 let maxRounds = 3;
@@ -112,6 +120,8 @@ let secondsPerRound = 60;
 let scoreMode = 'classic'; // 'classic' = 1pt/letter, 'scrabble' = letter-value scoring
 let myTotalScore = 0;
 let myTotalWords = 0;
+let wordAttempts = 0; // successes + the 2 "genuine miss" rejections only
+let wordErrors = 0;   // just the 2 "genuine miss" rejections (board letters / not a word)
 let dictionarySet = new Set();
 let penaltyActive = false;
 let penaltyTimeLeft = 5;
@@ -172,6 +182,7 @@ const btnCopyLink = document.getElementById('btn-copy-link');
 const resultsList = document.getElementById('results-list');
 const resultsFilterBar = document.getElementById('results-filter-bar');
 const resultsEmptyMsg = document.getElementById('results-empty-msg');
+const toastStack = document.getElementById('toast-stack');
 const idlePrompt = document.getElementById('results-idle-prompt');
 const btnIdleRefresher = document.getElementById('btn-idle-refresher');
 const rulesRecapModal = document.getElementById('rules-recap-modal');
@@ -306,6 +317,11 @@ async function bootEngine() {
                 myTotalWords = parseInt(savedWords);
             }
 
+            const savedAttempts = sessionStorage.getItem('wordperfect_word_attempts');
+            if (savedAttempts) wordAttempts = parseInt(savedAttempts);
+            const savedErrors = sessionStorage.getItem('wordperfect_word_errors');
+            if (savedErrors) wordErrors = parseInt(savedErrors);
+
             // Restore round state if we were playing mid-round
             const savedIsPlaying = sessionStorage.getItem('wordperfect_is_playing') === 'true';
             if (savedIsPlaying) {
@@ -427,6 +443,8 @@ async function syncMyState() {
         isReady: isReady,
         score: myTotalScore,
         totalWords: myTotalWords,
+        wordAttempts: wordAttempts,
+        wordErrors: wordErrors,
         isHost: isHost,
         updatedAt: Date.now() // FIX: Forces Supabase to broadcast the change
     };
@@ -682,14 +700,29 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             return b.word.length - a.word.length; // tie-break: longer word first
         });
 
+        // A fresh round starts with nobody's likes counted yet — old counts must not bleed
+        // into this round's freshly-rebuilt rows.
+        wordLikes = {};
+
         // Render the results list — tap any word (cancelled or not) to look up its meaning
         resultsList.innerHTML = '';
         sortedResults.forEach(res => {
             const li = document.createElement('li');
             li.className = `result-row ${res.isDuplicate ? 'duplicate-word' : 'unique-word'}`;
             li.dataset.authors = JSON.stringify(res.authors); // read by the player filter
+            li.dataset.word = res.word; // read by the like listener
             const authorsText = res.authors.join(', ');
             const pointsText = res.isDuplicate ? 'CANCELLED' : `+${res.points} pts`;
+            // Omitted entirely (not just disabled) on your own word — including as a
+            // co-author of a cancelled duplicate — liking your own word notifies no one.
+            const iAmAuthor = res.authors.includes(myPlayerName);
+            const heartHtml = iAmAuthor ? '' : `
+                        <button type="button" class="heart-btn" title="Like this word">
+                            <svg class="heart-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+                            </svg>
+                            <span class="heart-count hidden">0</span>
+                        </button>`;
 
             li.innerHTML = `
                 <div class="result-row-header">
@@ -698,7 +731,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                         <span class="caption result-authors">${authorsText}</span>
                     </div>
                     <div style="display:flex; align-items:center; gap:10px;">
-                        <span class="result-points">${pointsText}</span>
+                        <span class="result-points">${pointsText}</span>${heartHtml}
                         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; transition: transform 0.3s var(--ease-out); opacity: 0.5; flex-shrink: 0;">
                             <polyline points="6 9 12 15 18 9"></polyline>
                         </svg>
@@ -709,6 +742,15 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                 </div>
             `;
             li.addEventListener('click', () => toggleResultDefinition(li, res.word));
+
+            const heartBtn = li.querySelector('.heart-btn');
+            if (heartBtn) {
+                heartBtn.addEventListener('click', (e) => {
+                    e.stopPropagation(); // don't also trigger the row's definition expand
+                    toggleWordLike(res.word, res.authors);
+                });
+            }
+
             resultsList.appendChild(li);
         });
 
@@ -750,6 +792,8 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         currentRound = 1;
         myTotalScore = 0;
         myTotalWords = 0;
+        wordAttempts = 0;
+        wordErrors = 0;
         isReady = false;
         // Bots now carry their score between rounds, so a new game has to clear it too
         myLocalAiPlayers = myLocalAiPlayers.map(bot => ({
@@ -765,6 +809,16 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
         hideOverlay(screenWinner);
         showOverlay(screenLobby);
+    });
+
+    // Word likes — room-wide, no host gating, every client both sends and listens
+    roomChannel.on('broadcast', { event: 'word_like' }, (response) => {
+        const data = response.word ? response : response.payload;
+        updateWordLikeUI(data.word, data.likerName, data.liked);
+        // Only the like transition toasts the author, never the unlike, and never yourself
+        if (data.liked && data.authorNames.includes(myPlayerName) && data.likerName !== myPlayerName) {
+            showToast(`${data.likerName} liked your word "${data.word}"!`);
+        }
     });
 
     // 3. Subscribe
@@ -1083,6 +1137,8 @@ async function leaveRoomAndGoHome() {
     currentRound = 1;
     myTotalScore = 0;
     myTotalWords = 0;
+    wordAttempts = 0;
+    wordErrors = 0;
     myLocalAiPlayers = [];
     aiEnabled = true;
     isReady = false;
@@ -1387,6 +1443,59 @@ if (resultsFilterBar) {
     });
 }
 
+// --- WORD LIKES + TOAST ---
+// No host gating needed — like submit_words/request_sync, this is a plain room-wide
+// broadcast every client both sends and listens for. word: Set<likerName>.
+let wordLikes = {};
+
+// Sends only — never touches the DOM itself. The channel already has broadcast:{self:true},
+// so the sender gets their own echo back and updateWordLikeUI (called only from the
+// listener) is the single code path for both the sender's and everyone else's UI update.
+async function toggleWordLike(word, authors) {
+    if (!roomChannel) return;
+    const likedNow = !!wordLikes[word]?.has(myPlayerName);
+    await roomChannel.send({
+        type: 'broadcast',
+        event: 'word_like',
+        payload: { word, authorNames: authors, likerName: myPlayerName, liked: !likedNow }
+    });
+}
+
+function updateWordLikeUI(word, likerName, liked) {
+    if (!wordLikes[word]) wordLikes[word] = new Set();
+    if (liked) wordLikes[word].add(likerName);
+    else wordLikes[word].delete(likerName);
+
+    const li = [...resultsList.querySelectorAll('.result-row')].find(el => el.dataset.word === word);
+    if (!li) return; // a late broadcast for a word no longer on screen — nothing to update
+    const heartBtn = li.querySelector('.heart-btn');
+    if (!heartBtn) return; // the row's own author has no heart button to update
+
+    const count = wordLikes[word].size;
+    heartBtn.classList.toggle('liked', wordLikes[word].has(myPlayerName));
+    heartBtn.querySelector('.heart-icon').classList.toggle('filled', wordLikes[word].has(myPlayerName));
+    const countEl = heartBtn.querySelector('.heart-count');
+    countEl.textContent = count;
+    countEl.classList.toggle('hidden', count === 0); // declutter the zero-state
+}
+
+function showToast(message) {
+    const card = document.createElement('div');
+    card.className = 'toast-card';
+    card.innerHTML = `
+        <svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+        </svg>
+        <span class="body-strong" style="font-size: 14px;">${message}</span>
+    `;
+    toastStack.appendChild(card);
+
+    setTimeout(() => {
+        card.classList.add('leaving');
+        setTimeout(() => card.remove(), 220);
+    }, 3200);
+}
+
 function adjustSelectWidth(select) {
     const tempSpan = document.createElement('span');
     tempSpan.style.visibility = 'hidden';
@@ -1497,6 +1606,11 @@ function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? curren
         const ptsPerRound = (p.score / roundsPlayed).toFixed(1);
         const wordsPerRound = (tWords / roundsPlayed).toFixed(1);
         const ptsPerWord = tWords > 0 ? (p.score / tWords).toFixed(1) : "0.0";
+        // Bots never call attemptSubmitWord (their words are host-generated), so they
+        // naturally read as 0/0 here — same "0.0"-not-a-placeholder convention as ptsPerWord.
+        const pAttempts = p.wordAttempts || 0;
+        const pErrors = p.wordErrors || 0;
+        const errorRate = pAttempts > 0 ? ((pErrors / pAttempts) * 100).toFixed(0) : "0";
 
         div.innerHTML = `
             <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
@@ -1525,6 +1639,10 @@ function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? curren
                     <div>
                         <div class="body-strong">${ptsPerWord}</div>
                         <div class="caption text-muted">Avg Ratio</div>
+                    </div>
+                    <div>
+                        <div class="body-strong">${errorRate}%</div>
+                        <div class="caption text-muted">Error Rate</div>
                     </div>
                 </div>
             </div>
@@ -1572,6 +1690,11 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
         const ptsPerRound = (p.score / roundsPlayed).toFixed(1);
         const wordsPerRound = (tWords / roundsPlayed).toFixed(1);
         const ptsPerWord = tWords > 0 ? (p.score / tWords).toFixed(1) : "0.0";
+        // Bots never call attemptSubmitWord (their words are host-generated), so they
+        // naturally read as 0/0 here — same "0.0"-not-a-placeholder convention as ptsPerWord.
+        const pAttempts = p.wordAttempts || 0;
+        const pErrors = p.wordErrors || 0;
+        const errorRate = pAttempts > 0 ? ((pErrors / pAttempts) * 100).toFixed(0) : "0";
 
         div.innerHTML = `
             <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
@@ -1599,6 +1722,10 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
                     <div>
                         <div class="body-strong">${ptsPerWord}</div>
                         <div class="caption text-muted">Avg Ratio</div>
+                    </div>
+                    <div>
+                        <div class="body-strong">${errorRate}%</div>
+                        <div class="caption text-muted">Error Rate</div>
                     </div>
                 </div>
             </div>
@@ -1789,6 +1916,10 @@ function startTutorial() {
     draftedWords = [];
     myTotalScore = 0;
     myTotalWords = 0;
+    // Belt-and-suspenders: the increment guard in attemptSubmitWord already stops tutorial
+    // fumbles from touching these, but reset for symmetry with score/totalWords above.
+    wordAttempts = 0;
+    wordErrors = 0;
     timeLeft = 60;
     isPlaying = true; // lets the input and tiles respond; every network path checks isTutorial
 
@@ -2102,25 +2233,60 @@ function isPlural(word) {
 // so each word is looked up at most once per session (including a "not found" result).
 const definitionCache = new Map();
 
+// Wiktionary first: measured against the actual validation wordlist, a random sample of
+// obscure-but-real words hit the Free Dictionary API at only ~48% (it's a small curated
+// snapshot; many valid words here are auto-generated inflections with no lemma entry of
+// their own). Wiktionary recovered ~96% of the same sample, so it goes first and the Free
+// Dictionary API becomes a resilience fallback rather than the primary source.
 async function fetchDefinition(word) {
     const key = word.toUpperCase();
     if (definitionCache.has(key)) return definitionCache.get(key);
 
-    let meaning = null;
-    try {
-        const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.toLowerCase())}`);
-        if (res.ok) {
-            const data = await res.json();
-            const entry = data?.[0]?.meanings?.[0];
-            const def = entry?.definitions?.[0]?.definition;
-            if (def) meaning = entry.partOfSpeech ? `(${entry.partOfSpeech}) ${def}` : def;
-        }
-    } catch (e) {
-        console.warn('Definition lookup failed for', word, e);
-    }
-
+    const meaning = (await fetchFromWiktionary(word)) || (await fetchFromDictionaryApi(word));
     definitionCache.set(key, meaning); // cache the miss too, so a bad word isn't refetched
     return meaning;
+}
+
+async function fetchFromWiktionary(word) {
+    try {
+        const res = await fetch(
+            `https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(word.toLowerCase())}`,
+            { headers: { 'Api-User-Agent': 'WordPerfectGame/1.0' } } // 'Api-User-Agent', not 'User-Agent' — browsers silently block scripts from setting the latter
+        );
+        if (!res.ok) return null;
+        const data = await res.json();
+        const entry = data?.en?.[0]; // Wiktionary nests definitions by language; English only
+        const def = entry?.definitions?.[0]?.definition;
+        if (!def) return null;
+        const clean = stripHtml(def); // definitions carry embedded <a href="/wiki/...">links</a>
+        return entry.partOfSpeech ? `(${entry.partOfSpeech.toLowerCase()}) ${clean}` : clean;
+    } catch (e) {
+        console.warn('Wiktionary lookup failed for', word, e);
+        return null;
+    }
+}
+
+async function fetchFromDictionaryApi(word) {
+    try {
+        const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.toLowerCase())}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const entry = data?.[0]?.meanings?.[0];
+        const def = entry?.definitions?.[0]?.definition;
+        if (!def) return null;
+        return entry.partOfSpeech ? `(${entry.partOfSpeech}) ${def}` : def;
+    } catch (e) {
+        console.warn('Dictionary API lookup failed for', word, e);
+        return null;
+    }
+}
+
+// Detached element: nothing is inserted into the document and nothing executes, this is
+// just the standard safe trick for turning a definition's embedded HTML into plain text.
+function stripHtml(html) {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    return div.textContent || '';
 }
 
 // Expand/collapse a results row and lazy-load its meaning on first open. Mirrors the
@@ -2214,11 +2380,16 @@ function attemptSubmitWord(rawWord) {
     if (!isWordInGrid(newWord)) {
         console.log("❌ Failed: Not in grid. Current board is:", boardLetters);
         rejectInput("Letters not on board!");
+        // A genuine wrong guess about the board — counts toward the error rate. The
+        // tutorial reuses this exact function on a real board, so a learner's fumble must
+        // not silently pollute their real game's stats once they leave it.
+        if (!isTutorial) { wordAttempts++; wordErrors++; }
         return false;
     }
     if (!dictionarySet.has(newWord)) {
         console.log("❌ Failed: Not in dictionary. Dict size:", dictionarySet.size);
         rejectInput("Not a valid word!");
+        if (!isTutorial) { wordAttempts++; wordErrors++; }
         return false;
     }
     if (isPlural(newWord)) {
@@ -2229,6 +2400,7 @@ function attemptSubmitWord(rawWord) {
 
     console.log("✅ Success! Adding to draft.");
     clearFieldError(wordInput); // a win retires any complaint still on screen
+    if (!isTutorial) wordAttempts++;
     draftedWords.unshift(newWord);
 
     // Save update to sessionStorage
@@ -2241,8 +2413,10 @@ function attemptSubmitWord(rawWord) {
         const li = document.createElement('li');
         li.className = 'draft-item body-strong';
         li.textContent = newWord;
+        li.dataset.word = newWord; // lets the delayed score popup find this row again
         draftList.prepend(li);
     }
+    scheduleScorePopup(newWord, scoreWord(newWord));
 
     roundScoreDisplay.textContent = `Drafted: ${draftedWords.length} words`;
 
@@ -2408,6 +2582,11 @@ function initPhysics() {
             drawPill(ctx, body.position.x, body.position.y, body.pillWidth, body.pillHeight, body.angle, body.wordText);
         });
 
+        // Score popups float on top of the pills, independent of the physics simulation
+        const now = performance.now();
+        scorePopups = scorePopups.filter(p => now - p.bornAt < SCORE_POPUP_LIFETIME_MS);
+        scorePopups.forEach(p => drawScorePopup(ctx, p, now));
+
         physicsAnimId = requestAnimationFrame(updatePhysicsFrame);
     }
     updatePhysicsFrame();
@@ -2445,6 +2624,24 @@ function drawPill(ctx, x, y, width, height, angle, text) {
     ctx.textBaseline = 'middle';
     ctx.fillText(text, 0, 0);
 
+    ctx.restore();
+}
+
+// Fades out while drifting upward, independent of the physics engine — canvas can't read
+// CSS custom properties, so this mirrors drawPill's own light/dark literal-color branching.
+function drawScorePopup(ctx, popup, now) {
+    const t = (now - popup.bornAt) / SCORE_POPUP_LIFETIME_MS; // 0..1
+    const opacity = 1 - t;
+    const yOffset = -24 * t;
+    const isDark = document.body.classList.contains('dark-theme');
+
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, opacity);
+    ctx.fillStyle = isDark ? '#4d94ff' : '#0066cc';
+    ctx.font = '700 14px "SF Pro Text", "Inter", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(popup.text, popup.x, popup.y + yOffset);
     ctx.restore();
 }
 
@@ -2487,6 +2684,41 @@ function addWordToPhysics(word, staggerIndex = 0) {
 
     physicsWordBodies.push(body);
     Matter.World.add(physicsWorld, body);
+}
+
+// A short fixed delay after drop, rather than watching the pill's velocity to detect an
+// exact landing — simpler, and the DOM fallback list (mobile / reduced motion) has no
+// physics to watch anyway, so it needs a fixed-timing path regardless. The number shown is
+// provisional (what the word is worth if nobody else finds it) — the true score, after
+// duplicate-cancellation, only exists once the round ends and is what results screen shows.
+function scheduleScorePopup(word, points) {
+    setTimeout(() => spawnScorePopup(word, points), SCORE_POPUP_DELAY_MS);
+}
+
+function spawnScorePopup(word, points) {
+    if (!isPlaying) return; // round ended while we were waiting — nothing to attach to
+    if (typeof Matter !== 'undefined' && physicsWorld) {
+        spawnCanvasScorePopup(word, points);
+    } else {
+        spawnDomScorePopup(word, points);
+    }
+}
+
+function spawnCanvasScorePopup(word, points) {
+    // Most-recently-added body with this text, in the rare case of a repeated word
+    const body = [...physicsWordBodies].reverse().find(b => b.wordText === word);
+    if (!body) return; // pill was somehow already removed
+    scorePopups.push({ x: body.position.x, y: body.position.y, text: `+${points}`, bornAt: performance.now() });
+}
+
+function spawnDomScorePopup(word, points) {
+    const li = [...draftList.children].find(el => el.dataset.word === word);
+    if (!li) return; // list was cleared (new round) before this fired
+    const span = document.createElement('span');
+    span.className = 'score-popup';
+    span.textContent = `+${points}`;
+    li.appendChild(span);
+    setTimeout(() => span.remove(), SCORE_POPUP_LIFETIME_MS);
 }
 
 // Bind Home Buttons
