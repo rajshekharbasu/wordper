@@ -39,7 +39,72 @@ let hostSubmissions = {};
 let roundFinalized = false;
 let finalizeWatchdog = null;
 let activePlayersList = []; // Kept in sync via presence
+let hostElectionInProgress = false;
+let lastKnownHostId = null;
+let lastKnownAiPlayers = []; // survives host leave so a new host can adopt the bots
+let reconcilingBots = false;
+let cachedBoardWords = null;
+let cachedBoardKey = '';
+let myLocalAiPlayers = [];
+// Host-only: whether a bot should fill in while the host waits alone
+let aiEnabled = true;
 const btnOpenTutorial = document.getElementById('btnOpenTutorial');
+
+// Escape user-controlled strings before interpolating into innerHTML
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getBroadcastData(response) {
+    if (!response) return {};
+    if (response.payload && typeof response.payload === 'object') return response.payload;
+    return response;
+}
+
+function getHostPlayerId() {
+    const host = activePlayersList.find(p => p.isHost && !p.isAi);
+    return host ? host.id : null;
+}
+
+function getElectedHostId() {
+    const realPlayers = activePlayersList.filter(p => !p.isAi);
+    if (realPlayers.length === 0) return null;
+    return [...realPlayers]
+        .map(p => p.id)
+        .sort((a, b) => String(a).localeCompare(String(b)))[0];
+}
+
+// Soft auth: ignore game-control broadcasts that aren't from the current host.
+// Presence ids are visible to the room, so this blocks casual spoofing, not a determined attacker.
+function isFromCurrentHost(data) {
+    if (!data || data.senderId == null) return false;
+    const liveHostId = getHostPlayerId();
+    if (liveHostId) return data.senderId === liveHostId;
+    if (lastKnownHostId && data.senderId === lastKnownHostId) return true;
+    // Failover window: no live host yet — accept only the deterministic election winner
+    const electedId = getElectedHostId();
+    return !!electedId && data.senderId === electedId;
+}
+
+// Host re-validates every submitted word so a modified client can't score junk
+function sanitizeSubmittedWords(words) {
+    if (!Array.isArray(words)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const raw of words) {
+        const w = String(raw || '').trim().toUpperCase();
+        if (w.length < 4 || seen.has(w)) continue;
+        if (!isWordInGrid(w) || !dictionarySet.has(w) || isPlural(w)) continue;
+        seen.add(w);
+        out.push(w);
+    }
+    return out;
+}
 
 // The old 4-card popup is gone; "How to Play" now runs the guided tutorial defined further
 // down, which teaches on the real game chassis instead of describing it.
@@ -76,6 +141,11 @@ function saveGameStateToSession() {
     sessionStorage.setItem('wordperfect_total_score', myTotalScore.toString());
     sessionStorage.setItem('wordperfect_word_attempts', wordAttempts.toString());
     sessionStorage.setItem('wordperfect_word_errors', wordErrors.toString());
+    // Bots live only on the host — persist so a host refresh mid-round doesn't erase them
+    if (isHost) {
+        sessionStorage.setItem('wordperfect_bots', JSON.stringify(myLocalAiPlayers));
+        sessionStorage.setItem('wordperfect_ai_enabled', aiEnabled ? 'true' : 'false');
+    }
 }
 
 function clearGameStateFromSession() {
@@ -92,6 +162,8 @@ function clearGameStateFromSession() {
     sessionStorage.removeItem('wordperfect_total_words');
     sessionStorage.removeItem('wordperfect_word_attempts');
     sessionStorage.removeItem('wordperfect_word_errors');
+    sessionStorage.removeItem('wordperfect_bots');
+    sessionStorage.removeItem('wordperfect_ai_enabled');
 
     // Clear draft words for all rounds
     for (let i = 0; i < sessionStorage.length; i++) {
@@ -288,14 +360,50 @@ async function failJoin(message, field = inputRoomCode, hint = 'NO ROOM') {
 }
 
 // --- BOOT SEQUENCE ---
+const BOOT_TIPS = [
+    'Tip: Unique words score. Shared words cancel for everyone.',
+    'Tip: No basic plurals — RAIN works, RAINS does not.',
+    'Tip: Longer words pay more in Classic. Rare letters pay more in Scrabble.',
+    'Tip: Lock in early if you are done — no need to wait out the clock.',
+    'Tip: Obscure finds beat obvious ones when the room is sharp.',
+];
+
+let bootTipTimer = null;
+
+function startBootTips() {
+    const tipEl = document.getElementById('boot-tip');
+    if (!tipEl || prefersReducedMotion()) {
+        if (tipEl) tipEl.textContent = BOOT_TIPS[0];
+        return;
+    }
+    let i = 0;
+    tipEl.textContent = BOOT_TIPS[0];
+    bootTipTimer = setInterval(() => {
+        tipEl.classList.add('is-fading');
+        setTimeout(() => {
+            i = (i + 1) % BOOT_TIPS.length;
+            tipEl.textContent = BOOT_TIPS[i];
+            tipEl.classList.remove('is-fading');
+        }, 220);
+    }, 2800);
+}
+
+function stopBootTips() {
+    clearInterval(bootTipTimer);
+    bootTipTimer = null;
+}
+
 async function bootEngine() {
+    const bootLoading = document.getElementById('boot-loading');
+    startBootTips();
     try {
         const response = await fetch('https://raw.githubusercontent.com/MagicOctopusUrn/wordListsByLength/master/unsorted.txt');
         const text = await response.text();
         const words = text.split(/\r?\n/).filter(word => word.trim().length > 0);
         dictionarySet = new Set(words.map(word => word.trim().toUpperCase()));
 
-        bootStatus.classList.add('hidden');
+        stopBootTips();
+        if (bootLoading) bootLoading.classList.add('hidden');
         multiplayerControls.classList.remove('hidden');
 
         // Check for saved session to auto-rejoin
@@ -333,7 +441,12 @@ async function bootEngine() {
                 const savedTimeLeft = sessionStorage.getItem('wordperfect_time_left');
 
                 if (savedBoard) {
-                    boardLetters = JSON.parse(savedBoard);
+                    try {
+                        boardLetters = JSON.parse(savedBoard);
+                        if (!Array.isArray(boardLetters)) boardLetters = [];
+                    } catch (e) {
+                        boardLetters = [];
+                    }
                 }
                 if (savedCurRound) {
                     currentRound = parseInt(savedCurRound);
@@ -352,6 +465,24 @@ async function bootEngine() {
                 }
                 isPlaying = true;
             }
+
+            // Host refresh: restore bots so mid-round scoring still has an opponent
+            if (savedIsHost) {
+                const savedAiEnabled = sessionStorage.getItem('wordperfect_ai_enabled');
+                if (savedAiEnabled !== null) aiEnabled = savedAiEnabled === 'true';
+                const savedBots = sessionStorage.getItem('wordperfect_bots');
+                if (savedBots) {
+                    try {
+                        const parsed = JSON.parse(savedBots);
+                        if (Array.isArray(parsed)) {
+                            myLocalAiPlayers = parsed;
+                            lastKnownAiPlayers = parsed.map(b => ({ ...b }));
+                        }
+                    } catch (e) {
+                        myLocalAiPlayers = [];
+                    }
+                }
+            }
             
             await joinRealtimeRoom(savedRoom, savedName, savedIsHost);
         } else {
@@ -364,7 +495,12 @@ async function bootEngine() {
             }
         }
     } catch (error) {
+        stopBootTips();
         bootStatus.textContent = 'Network Error. Could not load dictionary.';
+        const tipEl = document.getElementById('boot-tip');
+        if (tipEl) tipEl.textContent = 'Check your connection and refresh to try again.';
+        const spinner = document.querySelector('.boot-spinner');
+        if (spinner) spinner.style.display = 'none';
     }
 }
 
@@ -446,6 +582,7 @@ async function syncMyState() {
         wordAttempts: wordAttempts,
         wordErrors: wordErrors,
         isHost: isHost,
+        isPlaying: isPlaying,
         updatedAt: Date.now() // FIX: Forces Supabase to broadcast the change
     };
 
@@ -459,6 +596,57 @@ async function syncMyState() {
     await roomChannel.track(trackPayload);
 }
 
+async function maybeElectNewHost() {
+    if (!roomChannel || hostElectionInProgress) return;
+
+    const realPlayers = activePlayersList.filter(p => !p.isAi);
+    if (realPlayers.length === 0) return;
+    if (realPlayers.some(p => p.isHost)) return;
+
+    const electedId = [...realPlayers]
+        .map(p => p.id)
+        .sort((a, b) => String(a).localeCompare(String(b)))[0];
+    if (electedId !== myPlayerId) return;
+
+    hostElectionInProgress = true;
+    try {
+        console.log('Host left — taking over as host');
+        isHost = true;
+        lastKnownHostId = myPlayerId;
+        sessionStorage.setItem('wordperfect_is_host', 'true');
+
+        // Adopt the previous host's bots (presence drops them with the old host)
+        if (myLocalAiPlayers.length === 0 && lastKnownAiPlayers.length > 0) {
+            myLocalAiPlayers = lastKnownAiPlayers.map(b => ({ ...b, updatedAt: Date.now() }));
+            aiEnabled = true;
+            syncAiSwitch();
+        }
+
+        lobbyInputRounds.disabled = false;
+        lobbyInputTime.disabled = false;
+        if (lobbyModeToggle) lobbyModeToggle.classList.remove('disabled');
+        resetReadyButtons();
+        await syncMyState();
+
+        // Recover submissions lost when the previous host dropped or refreshed
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'request_resubmit',
+            payload: { senderId: myPlayerId }
+        });
+
+        clearTimeout(finalizeWatchdog);
+        finalizeWatchdog = setTimeout(() => {
+            if (isHost && !roundFinalized) {
+                console.warn('Finalize watchdog fired after host takeover.');
+                finalizeRound();
+            }
+        }, 10000);
+    } finally {
+        hostElectionInProgress = false;
+    }
+}
+
 async function joinRealtimeRoom(code, name, hostFlag) {
     myRoomCode = code;
     myPlayerName = name;
@@ -468,6 +656,16 @@ async function joinRealtimeRoom(code, name, hostFlag) {
     sessionStorage.setItem('wordperfect_room', code);
     sessionStorage.setItem('wordperfect_name', name);
     sessionStorage.setItem('wordperfect_is_host', hostFlag ? 'true' : 'false');
+
+    // Tear down any previous channel so re-join doesn't orphan listeners / ghost presence
+    if (roomChannel) {
+        try {
+            await roomChannel.unsubscribe();
+        } catch (e) {
+            console.error('Error unsubscribing previous channel:', e);
+        }
+        roomChannel = null;
+    }
 
     // FIX: Explicitly configure the channel to accept Presence and Broadcast features
     roomChannel = supabaseClient.channel(`room:${myRoomCode}`, {
@@ -505,6 +703,15 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         
         // Append bots to the players list
         activePlayersList = [...activePlayersList, ...aiPlayersToAppend];
+
+        // Cache bots whenever we see them — host leave removes them from presence, but
+        // the elected replacement still needs the roster mid-round.
+        if (aiPlayersToAppend.length > 0) {
+            lastKnownAiPlayers = aiPlayersToAppend.map(b => ({ ...b }));
+        }
+
+        const liveHost = activePlayersList.find(p => p.isHost && !p.isAi);
+        if (liveHost) lastKnownHostId = liveHost.id;
 
         // Guest synchronizes with the host's settings (maxRounds, secondsPerRound) in real-time
         const hostPlayer = activePlayersList.find(p => p.isHost);
@@ -563,9 +770,13 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         }
 
         // A host in presence is the proof we were waiting for. The roster it brings is also
-        // the first chance to see whether our name is already spoken for.
+        // the first chance to see whether our name is already spoken for — or if a round
+        // is already live (late joins softlock finalize by becoming required submitters).
         if (awaitingHostConfirm && activePlayersList.some(p => p.isHost)) {
-            if (findNameClash(activePlayersList, myPlayerName, myPlayerId)) {
+            const hostPlayer = activePlayersList.find(p => p.isHost);
+            if (hostPlayer && hostPlayer.isPlaying) {
+                failJoin('That game is already in progress. Try again after it ends.');
+            } else if (findNameClash(activePlayersList, myPlayerName, myPlayerId)) {
                 failJoin(NAME_TAKEN_MSG, inputPlayerName, 'TAKEN');
             } else {
                 confirmRoomExists();
@@ -576,6 +787,8 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
         // Someone leaving can be the event that completes the round
         maybeFinalizeRound();
+        // If the host vanished mid-session, elect a replacement so the room isn't softlocked
+        maybeElectNewHost();
     };
     // FIX: Bind to all three events to guarantee we don't miss any updates
     roomChannel.on('presence', { event: 'sync' }, handlePresenceUpdate);
@@ -586,16 +799,23 @@ async function joinRealtimeRoom(code, name, hostFlag) {
     roomChannel.on('broadcast', { event: 'trigger_game' }, (response) => {
         console.log("Raw trigger_game response:", response); // For debugging
 
-        // Bulletproof Extraction: Handles both raw unwrapped data and nested Supabase payloads
-        const data = response.board ? response : response.payload;
+        const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) {
+            console.warn('Ignoring trigger_game from non-host');
+            return;
+        }
 
         boardLetters = data.board;
         maxRounds = data.maxRounds || 3;
         secondsPerRound = data.roundTime || 60;
         scoreMode = data.scoreMode || 'classic';
         setModeToggleUI(scoreMode);
+        cachedBoardWords = null;
+        cachedBoardKey = '';
 
         isReady = false;
+        isPlaying = true; // guests must lock this before countdown finishes
+        roundFinalized = false;
         resetReadyButtons();
 
         // Persist to session storage
@@ -613,13 +833,14 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
     // Listen for request_sync (Host responds to rejoining clients)
     roomChannel.on('broadcast', { event: 'request_sync' }, async (response) => {
-        const data = response.payload || response;
+        const data = getBroadcastData(response);
         if (isHost && isPlaying) {
             console.log("Host received request_sync from requester:", data.requesterId);
             await roomChannel.send({
                 type: 'broadcast',
                 event: 'sync_game_state',
                 payload: {
+                    senderId: myPlayerId,
                     board: boardLetters,
                     currentRound: currentRound,
                     maxRounds: maxRounds,
@@ -631,9 +852,27 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         }
     });
 
+    // Host (or newly elected host) asks locked-in clients to resend their drafts
+    roomChannel.on('broadcast', { event: 'request_resubmit' }, async (response) => {
+        const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data) || !roomChannel) return;
+        // Already locked in for this round — resend so the host can score
+        if (!isPlaying && Array.isArray(draftedWords)) {
+            await roomChannel.send({
+                type: 'broadcast',
+                event: 'submit_words',
+                payload: { playerId: myPlayerId, words: draftedWords }
+            });
+        }
+    });
+
     // Listen for sync_game_state (Guests align with Host)
     roomChannel.on('broadcast', { event: 'sync_game_state' }, (response) => {
-        const data = response.payload || response;
+        const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) {
+            console.warn('Ignoring sync_game_state from non-host');
+            return;
+        }
         if (!isHost) {
             console.log("Received sync_game_state from host:", data);
             
@@ -644,6 +883,10 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             secondsPerRound = data.roundTime || 60;
             scoreMode = data.scoreMode || 'classic';
             setModeToggleUI(scoreMode);
+            cachedBoardWords = null;
+            cachedBoardKey = '';
+
+            const syncedLeft = typeof data.timeLeft === 'number' ? data.timeLeft : secondsPerRound;
 
             // Persist to session storage
             sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
@@ -652,32 +895,36 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
             sessionStorage.setItem('wordperfect_score_mode', scoreMode);
             sessionStorage.setItem('wordperfect_is_playing', 'true');
-            sessionStorage.setItem('wordperfect_time_left', data.timeLeft.toString());
+            sessionStorage.setItem('wordperfect_time_left', String(syncedLeft));
 
             if (!isPlaying) {
                 hideOverlay(screenLobby);
                 hideOverlay(screenStandings);
                 hideOverlay(screenResults);
                 updateLobbyRoundText();
-                initRound(data.timeLeft);
+                initRound(syncedLeft);
             } else {
                 // Just sync the timeLeft
-                timeLeft = data.timeLeft;
+                timeLeft = syncedLeft;
             }
         }
     });
 
-    // Only the Host listens for word submissions
-    if (isHost) {
-        roomChannel.on('broadcast', { event: 'submit_words' }, (response) => {
-            const data = response.playerId ? response : response.payload;
-            hostSubmissions[data.playerId] = data.words;
-            maybeFinalizeRound();
-        });
-    }
+    // Always bind — isHost can flip after failover; gate inside the handler
+    roomChannel.on('broadcast', { event: 'submit_words' }, (response) => {
+        if (!isHost) return;
+        const data = getBroadcastData(response);
+        if (!data.playerId) return;
+        hostSubmissions[data.playerId] = sanitizeSubmittedWords(data.words);
+        maybeFinalizeRound();
+    });
 
     roomChannel.on('broadcast', { event: 'round_results' }, async (response) => {
-        const data = response.results ? response : response.payload;
+        const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data) || !Array.isArray(data.results)) {
+            console.warn('Ignoring round_results from non-host or malformed payload');
+            return;
+        }
 
         hideOverlay(screenCountdown);
         showOverlay(screenResults);
@@ -711,7 +958,8 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             li.className = `result-row ${res.isDuplicate ? 'duplicate-word' : 'unique-word'}`;
             li.dataset.authors = JSON.stringify(res.authors); // read by the player filter
             li.dataset.word = res.word; // read by the like listener
-            const authorsText = res.authors.join(', ');
+            const authorsText = escapeHtml(res.authors.join(', '));
+            const safeWord = escapeHtml(res.word);
             const pointsText = res.isDuplicate ? 'CANCELLED' : `+${res.points} pts`;
             // Omitted entirely (not just disabled) on your own word — including as a
             // co-author of a cancelled duplicate — liking your own word notifies no one.
@@ -727,7 +975,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             li.innerHTML = `
                 <div class="result-row-header">
                     <div style="display:flex; flex-direction:column;">
-                        <span class="result-word">${res.word}</span>
+                        <span class="result-word">${safeWord}</span>
                         <span class="caption result-authors">${authorsText}</span>
                     </div>
                     <div style="display:flex; align-items:center; gap:10px;">
@@ -788,7 +1036,13 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         }
     });
 
-    roomChannel.on('broadcast', { event: 'game_reset' }, async () => {
+    roomChannel.on('broadcast', { event: 'game_reset' }, async (response) => {
+        const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) {
+            console.warn('Ignoring game_reset from non-host');
+            return;
+        }
+
         currentRound = 1;
         myTotalScore = 0;
         myTotalWords = 0;
@@ -813,10 +1067,11 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
     // Word likes — room-wide, no host gating, every client both sends and listens
     roomChannel.on('broadcast', { event: 'word_like' }, (response) => {
-        const data = response.word ? response : response.payload;
+        const data = getBroadcastData(response);
+        if (!data.word || !data.likerName) return;
         updateWordLikeUI(data.word, data.likerName, data.liked);
         // Only the like transition toasts the author, never the unlike, and never yourself
-        if (data.liked && data.authorNames.includes(myPlayerName) && data.likerName !== myPlayerName) {
+        if (data.liked && Array.isArray(data.authorNames) && data.authorNames.includes(myPlayerName) && data.likerName !== myPlayerName) {
             showToast(`${data.likerName} liked your word "${data.word}"!`);
         }
     });
@@ -868,9 +1123,24 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                 event: 'request_sync',
                 payload: { requesterId: myPlayerId }
             });
+
+            // Host refresh mid-round: ask locked-in clients to resend submissions
+            if (isHost && isPlaying) {
+                hostSubmissions = {};
+                roundFinalized = false;
+                await roomChannel.send({
+                    type: 'broadcast',
+                    event: 'request_resubmit',
+                    payload: { senderId: myPlayerId }
+                });
+            }
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
             console.error("Supabase Realtime Subscription Error:", status);
-            sessionStorage.clear(); // Clear bad/stale session parameters
+            // Don't sessionStorage.clear() — that also wipes theme and unrelated keys
+            clearGameStateFromSession();
+            sessionStorage.removeItem('wordperfect_room');
+            sessionStorage.removeItem('wordperfect_name');
+            sessionStorage.removeItem('wordperfect_is_host');
             alert("Failed to connect to the game server. Please try again.");
             // Reset URL parameters and return home
             window.location.href = window.location.origin + window.location.pathname;
@@ -883,6 +1153,8 @@ async function startGameAsHost() {
     isPlaying = true; // FIX: Lock the game state so this doesn't double-fire
     hostSubmissions = {};
     roundFinalized = false;
+    cachedBoardWords = null;
+    cachedBoardKey = '';
     const newBoard = [];
     for (let i = 0; i < 16; i++) {
         newBoard.push(letterBag[Math.floor(Math.random() * letterBag.length)]);
@@ -894,18 +1166,105 @@ async function startGameAsHost() {
     await roomChannel.send({
         type: 'broadcast',
         event: 'trigger_game',
-        payload: { board: newBoard, maxRounds: maxRounds, roundTime: secondsPerRound, scoreMode: scoreMode }
+        payload: { senderId: myPlayerId, board: newBoard, maxRounds: maxRounds, roundTime: secondsPerRound, scoreMode: scoreMode }
     });
 }
 
 function getAllValidBoardWords() {
+    const key = boardLetters.join('');
+    if (cachedBoardKey === key && cachedBoardWords) return cachedBoardWords;
+
     const validWords = [];
     for (const word of dictionarySet) {
         if (word.length >= 4 && !isPlural(word) && isWordInGrid(word)) {
             validWords.push(word);
         }
     }
+    cachedBoardKey = key;
+    cachedBoardWords = validWords;
     return validWords;
+}
+
+function shuffleInPlace(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+// Difficulty profiles: Easy finds short/common-ish words and collides more;
+// Hard finds longer / higher-value words and tries to dodge human finds.
+const BOT_DIFFICULTY = {
+    Easy: {
+        minCount: 2, maxCount: 4, maxLen: 5,
+        avoidHumanChance: 0.25, preferHighValue: false, lengthBias: 'short'
+    },
+    Medium: {
+        minCount: 4, maxCount: 7, maxLen: 7,
+        avoidHumanChance: 0.55, preferHighValue: true, lengthBias: 'mid'
+    },
+    Hard: {
+        minCount: 7, maxCount: 12, maxLen: 16,
+        avoidHumanChance: 0.85, preferHighValue: true, lengthBias: 'long'
+    }
+};
+
+function botWordScore(word) {
+    // Ranking key for preferential picks — Scrabble mode weights letter values
+    if (scoreMode === 'scrabble') return scoreWord(word) * 10 + word.length;
+    return word.length * 10 + (scoreWord(word) || 0);
+}
+
+function generateBotWords(bot, allValidWords, humanWordSet) {
+    const cfg = BOT_DIFFICULTY[bot.difficulty] || BOT_DIFFICULTY.Medium;
+    const targetCount = cfg.minCount + Math.floor(Math.random() * (cfg.maxCount - cfg.minCount + 1));
+
+    // Prefer the difficulty's length band; if the board is sparse, widen until we have a pool
+    let pool = allValidWords.filter(w => w.length >= 4 && w.length <= cfg.maxLen);
+    if (pool.length < targetCount) {
+        pool = allValidWords.filter(w => w.length >= 4 && w.length <= Math.min(cfg.maxLen + 2, 16));
+    }
+    if (pool.length === 0) pool = [...allValidWords];
+
+    // Shuffle first, then stable-sort by preference — ties keep random order
+    pool = shuffleInPlace([...pool]);
+    pool.sort((a, b) => {
+        if (cfg.lengthBias === 'short') return a.length - b.length;
+        if (cfg.lengthBias === 'long') return botWordScore(b) - botWordScore(a);
+        // mid: mild preference for mid-length, with score awareness when enabled
+        const midA = Math.abs(a.length - 5);
+        const midB = Math.abs(b.length - 5);
+        if (cfg.preferHighValue) {
+            const scoreDelta = botWordScore(b) - botWordScore(a);
+            if (Math.abs(scoreDelta) > 8) return scoreDelta;
+        }
+        return midA - midB;
+    });
+
+    const picked = [];
+    const pickedSet = new Set();
+
+    // First pass: respect avoid-human preference
+    for (const word of pool) {
+        if (picked.length >= targetCount) break;
+        if (pickedSet.has(word)) continue;
+        if (humanWordSet.has(word) && Math.random() < cfg.avoidHumanChance) continue;
+        picked.push(word);
+        pickedSet.add(word);
+    }
+
+    // Second pass: fill remaining slots even if they collide (Easy often does; Hard rarely needs this)
+    if (picked.length < targetCount) {
+        const remainder = shuffleInPlace(pool.filter(w => !pickedSet.has(w)));
+        for (const word of remainder) {
+            if (picked.length >= targetCount) break;
+            picked.push(word);
+            pickedSet.add(word);
+        }
+    }
+
+    return picked;
 }
 
 // A round ends when everyone still in the room has reported. This must be re-checked on
@@ -950,42 +1309,36 @@ function scoreWord(word) {
 async function calculateScoresAndBroadcast() {
     let wordMap = {};
 
-    // Generate AI player submissions right here on the Host!
+    // Human words already in hostSubmissions — bots try (by difficulty) not to cancel them
+    const humanWordSet = new Set();
+    for (const playerId of Object.keys(hostSubmissions)) {
+        const player = activePlayersList.find(p => p.id === playerId);
+        if (player && player.isAi) continue;
+        for (const w of hostSubmissions[playerId] || []) humanWordSet.add(w);
+    }
+
+    // Prefer host-owned bots; fall back to whatever is still on the roster (failover)
+    const aiPlayers = (myLocalAiPlayers.length > 0
+        ? myLocalAiPlayers
+        : activePlayersList.filter(p => p.isAi));
+
     const allValidWords = getAllValidBoardWords();
-    const aiPlayers = activePlayersList.filter(p => p.isAi);
-    
     aiPlayers.forEach(bot => {
-        let count = 0;
-        let minLen = 4;
-        let maxLen = 8;
-        
-        if (bot.difficulty === 'Easy') {
-            count = Math.floor(2 + Math.random() * 3); // 2 to 4 words
-            maxLen = 5;
-        } else if (bot.difficulty === 'Medium') {
-            count = Math.floor(5 + Math.random() * 3); // 5 to 7 words
-            maxLen = 7;
-        } else { // Hard
-            count = Math.floor(8 + Math.random() * 4); // 8 to 11 words
-            maxLen = 12;
+        hostSubmissions[bot.id] = generateBotWords(bot, allValidWords, humanWordSet);
+    });
+
+    // Ensure AI entries are on the scoring roster even if presence briefly dropped them
+    let tempPlayers = JSON.parse(JSON.stringify(activePlayersList));
+    aiPlayers.forEach(bot => {
+        if (!tempPlayers.some(p => p.id === bot.id)) {
+            tempPlayers.push(JSON.parse(JSON.stringify(bot)));
         }
-        
-        let pool = allValidWords.filter(w => w.length >= minLen && w.length <= maxLen);
-        if (pool.length === 0) pool = allValidWords; // Fallback
-        
-        const botWords = [];
-        const shuffled = [...pool].sort(() => 0.5 - Math.random());
-        for (let i = 0; i < Math.min(count, shuffled.length); i++) {
-            botWords.push(shuffled[i]);
-        }
-        
-        hostSubmissions[bot.id] = botWords;
     });
 
     // Map words to authors
     for (let playerId in hostSubmissions) {
         let words = hostSubmissions[playerId];
-        let player = activePlayersList.find(p => p.id === playerId);
+        let player = tempPlayers.find(p => p.id === playerId) || activePlayersList.find(p => p.id === playerId);
         let playerName = player ? player.name : "Unknown";
 
         words.forEach(w => {
@@ -997,7 +1350,6 @@ async function calculateScoresAndBroadcast() {
     }
 
     let results = [];
-    let tempPlayers = JSON.parse(JSON.stringify(activePlayersList));
 
     for (let word in wordMap) {
         let authors = wordMap[word];
@@ -1026,11 +1378,14 @@ async function calculateScoresAndBroadcast() {
         if (!scored) return bot;
         return { ...bot, score: scored.score, totalWords: scored.totalWords || 0, updatedAt: Date.now() };
     });
+    lastKnownAiPlayers = myLocalAiPlayers.map(b => ({ ...b }));
+    saveGameStateToSession();
 
     await roomChannel.send({
         type: 'broadcast',
         event: 'round_results',
         payload: {
+            senderId: myPlayerId,
             results,
             players: tempPlayers,
             isGameOver: isGameOver,
@@ -1040,10 +1395,6 @@ async function calculateScoresAndBroadcast() {
 }
 
 
-let myLocalAiPlayers = [];
-// Host-only: whether a bot should fill in while the host waits alone
-let aiEnabled = true;
-
 const soccerPlayers = [
     "Messi", "Ronaldo", "Neymar", "Mbappe", "Haaland", 
     "Salah", "DeBruyne", "Kane", "Lewandowski", "Modric", 
@@ -1052,7 +1403,10 @@ const soccerPlayers = [
 
 function getRandomAiName() {
     const currentNames = activePlayersList.map(p => p.name.toUpperCase());
-    const availablePlayers = soccerPlayers.filter(name => !currentNames.includes(name.toUpperCase()));
+    // Also avoid colliding with names of bots we're about to keep
+    const botNames = myLocalAiPlayers.map(p => p.name.toUpperCase());
+    const taken = new Set([...currentNames, ...botNames]);
+    const availablePlayers = soccerPlayers.filter(name => !taken.has(name.toUpperCase()));
     
     const baseName = availablePlayers.length > 0 
         ? availablePlayers[Math.floor(Math.random() * availablePlayers.length)]
@@ -1078,16 +1432,27 @@ function createBot() {
 // aside as soon as a second real player arrives. Host-authoritative, since bots
 // live in the host's presence payload.
 async function reconcileBots(realPlayerCount) {
-    if (!isHost || isPlaying) return;
+    if (!isHost || isPlaying || reconcilingBots) return;
+    reconcilingBots = true;
 
-    const hasBot = myLocalAiPlayers.length > 0;
+    try {
+        const hasBot = myLocalAiPlayers.length > 0;
 
-    if (realPlayerCount >= 2 && hasBot) {
-        myLocalAiPlayers = [];
-        await syncMyState();
-    } else if (realPlayerCount === 1 && !hasBot && aiEnabled) {
-        myLocalAiPlayers = [createBot()];
-        await syncMyState();
+        if (realPlayerCount >= 2 && hasBot) {
+            myLocalAiPlayers = [];
+            lastKnownAiPlayers = [];
+            saveGameStateToSession();
+            await syncMyState();
+        } else if (realPlayerCount === 1 && !hasBot && aiEnabled) {
+            // Assign synchronously before any await so overlapping presence events
+            // can't spawn a second bot.
+            myLocalAiPlayers = [createBot()];
+            lastKnownAiPlayers = myLocalAiPlayers.map(b => ({ ...b }));
+            saveGameStateToSession();
+            await syncMyState();
+        }
+    } finally {
+        reconcilingBots = false;
     }
 }
 
@@ -1140,9 +1505,12 @@ async function leaveRoomAndGoHome() {
     wordAttempts = 0;
     wordErrors = 0;
     myLocalAiPlayers = [];
+    lastKnownAiPlayers = [];
     aiEnabled = true;
     isReady = false;
     isHost = false;
+    cachedBoardWords = null;
+    cachedBoardKey = '';
 
     clearGameStateFromSession();
     sessionStorage.removeItem('wordperfect_room');
@@ -1300,7 +1668,7 @@ btnCopyLink.addEventListener('click', () => {
 
 btnPlayAgain.addEventListener('click', async () => {
     if (isHost) {
-        await roomChannel.send({ type: 'broadcast', event: 'game_reset' });
+        await roomChannel.send({ type: 'broadcast', event: 'game_reset', payload: { senderId: myPlayerId } });
     }
 });
 
@@ -1486,8 +1854,9 @@ function showToast(message) {
         <svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
         </svg>
-        <span class="body-strong" style="font-size: 14px;">${message}</span>
+        <span class="body-strong" style="font-size: 14px;"></span>
     `;
+    card.querySelector('span').textContent = message;
     toastStack.appendChild(card);
 
     setTimeout(() => {
@@ -1523,21 +1892,21 @@ function renderLobbyPlayers(players) {
             ? `<span class="ready-indicator ready" title="Ready"></span>`
             : `<span class="ready-indicator" title="Not Ready"></span>`;
             
-        const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
+        const nameDisplay = p.id === myPlayerId ? `${escapeHtml(p.name)} (You)` : escapeHtml(p.name);
         
         li.innerHTML = `
             <div class="player-info-group">
                 <span class="player-name">${nameDisplay}</span>
                 ${p.isAi ? (isHost ? `
                 <div style="display: flex; align-items: center; gap: 8px;">
-                    <select class="ai-difficulty-select-pill" data-ai-id="${p.id}">
+                    <select class="ai-difficulty-select-pill" data-ai-id="${escapeHtml(p.id)}">
                         <option value="Easy" ${p.difficulty === 'Easy' ? 'selected' : ''}>Easy</option>
                         <option value="Medium" ${p.difficulty === 'Medium' ? 'selected' : ''}>Medium</option>
                         <option value="Hard" ${p.difficulty === 'Hard' ? 'selected' : ''}>Hard</option>
                     </select>
-                    <button class="btn-remove-ai-inline" data-ai-id="${p.id}" title="Remove Bot">×</button>
+                    <button class="btn-remove-ai-inline" data-ai-id="${escapeHtml(p.id)}" title="Remove Bot">×</button>
                 </div>
-                ` : `<span class="ai-badge">${p.difficulty}</span>`) : ''}
+                ` : `<span class="ai-badge">${escapeHtml(p.difficulty)}</span>`) : ''}
             </div>
 
             <div style="display: flex; align-items: center; gap: 12px;">
@@ -1560,6 +1929,9 @@ function renderLobbyPlayers(players) {
                 const ai = myLocalAiPlayers.find(bot => bot.id === aiId);
                 if (ai) {
                     ai.difficulty = newDifficulty;
+                    ai.updatedAt = Date.now();
+                    lastKnownAiPlayers = myLocalAiPlayers.map(b => ({ ...b }));
+                    saveGameStateToSession();
                     await syncMyState();
                 }
             });
@@ -1574,11 +1946,44 @@ function renderLobbyPlayers(players) {
                 myLocalAiPlayers = myLocalAiPlayers.filter(bot => bot.id !== aiId);
                 // Dismissing the bot means opting out, or auto-join would bring it straight back
                 aiEnabled = false;
+                lastKnownAiPlayers = [];
                 syncAiSwitch();
+                saveGameStateToSession();
                 await syncMyState();
             });
         });
     }
+}
+
+const STAT_TIPS = {
+    ptsRound: 'Average points earned each round',
+    wordsRound: 'Average unique words that scored each round',
+    avgRatio: 'Average points per scoring word',
+    errorRate: 'Percent of typed attempts that were invalid'
+};
+
+function statsGridHtml({ ptsPerRound, wordsPerRound, ptsPerWord, errorRate, borderColor }) {
+    return `
+            <div class="stats-collapse" style="max-height: 0px; overflow: hidden; opacity: 0; transition: opacity 0.3s var(--ease-out), max-height 0.3s var(--ease-out);">
+                <div class="stats-grid" style="border-top: 1px solid ${borderColor};">
+                    <div class="stat-cell" tabindex="0" data-tip="${STAT_TIPS.ptsRound}">
+                        <div class="body-strong">${ptsPerRound}</div>
+                        <div class="caption text-muted">Pts/Round</div>
+                    </div>
+                    <div class="stat-cell" tabindex="0" data-tip="${STAT_TIPS.wordsRound}">
+                        <div class="body-strong">${wordsPerRound}</div>
+                        <div class="caption text-muted">Words/Round</div>
+                    </div>
+                    <div class="stat-cell" tabindex="0" data-tip="${STAT_TIPS.avgRatio}">
+                        <div class="body-strong">${ptsPerWord}</div>
+                        <div class="caption text-muted">Avg Ratio</div>
+                    </div>
+                    <div class="stat-cell" tabindex="0" data-tip="${STAT_TIPS.errorRate}">
+                        <div class="body-strong">${errorRate}%</div>
+                        <div class="caption text-muted">Error Rate</div>
+                    </div>
+                </div>
+            </div>`;
 }
 
 function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? currentRound - 1 : 1) {
@@ -1597,7 +2002,7 @@ function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? curren
         div.style.cursor = 'pointer';
 
         let rankLabel = rank === 1 ? '1st' : rank === 2 ? '2nd' : rank === 3 ? '3rd' : `${rank}th`;
-        const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
+        const nameDisplay = p.id === myPlayerId ? `${escapeHtml(p.name)} (You)` : escapeHtml(p.name);
         const readyIndicator = p.isReady
             ? `<span class="ready-indicator ready" title="Ready"></span>`
             : `<span class="ready-indicator" title="Not Ready"></span>`;
@@ -1611,6 +2016,7 @@ function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? curren
         const pAttempts = p.wordAttempts || 0;
         const pErrors = p.wordErrors || 0;
         const errorRate = pAttempts > 0 ? ((pErrors / pAttempts) * 100).toFixed(0) : "0";
+        const borderColor = rank === 1 ? 'rgba(0,102,204,0.15)' : 'var(--hairline)';
 
         div.innerHTML = `
             <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
@@ -1626,26 +2032,7 @@ function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? curren
                     </svg>
                 </div>
             </div>
-            <div class="stats-collapse" style="max-height: 0px; overflow: hidden; opacity: 0; transition: all 0.3s var(--ease-out);">
-                <div style="padding-top: 16px; margin-top: 16px; border-top: 1px solid ${rank === 1 ? 'rgba(0,102,204,0.15)' : 'var(--hairline)'}; display: flex; justify-content: space-around; text-align: center;">
-                    <div>
-                        <div class="body-strong">${ptsPerRound}</div>
-                        <div class="caption text-muted">Pts/Round</div>
-                    </div>
-                    <div>
-                        <div class="body-strong">${wordsPerRound}</div>
-                        <div class="caption text-muted">Words/Round</div>
-                    </div>
-                    <div>
-                        <div class="body-strong">${ptsPerWord}</div>
-                        <div class="caption text-muted">Avg Ratio</div>
-                    </div>
-                    <div>
-                        <div class="body-strong">${errorRate}%</div>
-                        <div class="caption text-muted">Error Rate</div>
-                    </div>
-                </div>
-            </div>
+            ${statsGridHtml({ ptsPerRound, wordsPerRound, ptsPerWord, errorRate, borderColor })}
         `;
 
         div.addEventListener('click', () => {
@@ -1656,10 +2043,12 @@ function renderStandingsScreen(players, roundsPlayed = currentRound > 1 ? curren
             if (isExpanded) {
                 collapse.style.maxHeight = '0px';
                 collapse.style.opacity = '0';
+                collapse.style.overflow = 'hidden';
                 chevron.style.transform = 'rotate(0deg)';
             } else {
-                collapse.style.maxHeight = '120px';
+                collapse.style.maxHeight = '180px';
                 collapse.style.opacity = '1';
+                collapse.style.overflow = 'visible';
                 chevron.style.transform = 'rotate(180deg)';
             }
         });
@@ -1684,7 +2073,7 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
         div.style.cursor = 'pointer';
 
         let rankLabel = rank === 1 ? '1st' : rank === 2 ? '2nd' : rank === 3 ? '3rd' : `${rank}th`;
-        const nameDisplay = p.id === myPlayerId ? `${p.name} (You)` : p.name;
+        const nameDisplay = p.id === myPlayerId ? `${escapeHtml(p.name)} (You)` : escapeHtml(p.name);
 
         const tWords = p.totalWords || 0;
         const ptsPerRound = (p.score / roundsPlayed).toFixed(1);
@@ -1695,6 +2084,7 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
         const pAttempts = p.wordAttempts || 0;
         const pErrors = p.wordErrors || 0;
         const errorRate = pAttempts > 0 ? ((pErrors / pAttempts) * 100).toFixed(0) : "0";
+        const borderColor = rank === 1 ? 'rgba(0,102,204,0.15)' : 'var(--hairline)';
 
         div.innerHTML = `
             <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
@@ -1709,26 +2099,7 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
                     </svg>
                 </div>
             </div>
-            <div class="stats-collapse" style="max-height: 0px; overflow: hidden; opacity: 0; transition: all 0.3s var(--ease-out);">
-                <div style="padding-top: 16px; margin-top: 16px; border-top: 1px solid ${rank === 1 ? 'rgba(0,102,204,0.15)' : 'var(--hairline)'}; display: flex; justify-content: space-around; text-align: center;">
-                    <div>
-                        <div class="body-strong">${ptsPerRound}</div>
-                        <div class="caption text-muted">Pts/Round</div>
-                    </div>
-                    <div>
-                        <div class="body-strong">${wordsPerRound}</div>
-                        <div class="caption text-muted">Words/Round</div>
-                    </div>
-                    <div>
-                        <div class="body-strong">${ptsPerWord}</div>
-                        <div class="caption text-muted">Avg Ratio</div>
-                    </div>
-                    <div>
-                        <div class="body-strong">${errorRate}%</div>
-                        <div class="caption text-muted">Error Rate</div>
-                    </div>
-                </div>
-            </div>
+            ${statsGridHtml({ ptsPerRound, wordsPerRound, ptsPerWord, errorRate, borderColor })}
         `;
         
         div.addEventListener('click', () => {
@@ -1739,10 +2110,12 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
             if (isExpanded) {
                 collapse.style.maxHeight = '0px';
                 collapse.style.opacity = '0';
+                collapse.style.overflow = 'hidden';
                 chevron.style.transform = 'rotate(0deg)';
             } else {
-                collapse.style.maxHeight = '120px';
+                collapse.style.maxHeight = '180px';
                 collapse.style.opacity = '1';
+                collapse.style.overflow = 'visible';
                 chevron.style.transform = 'rotate(180deg)';
             }
         });
@@ -2113,6 +2486,7 @@ function initRound(syncedTime = null) {
                     const li = document.createElement('li');
                     li.className = 'draft-item body-strong';
                     li.textContent = draftedWords[i];
+                    li.dataset.word = draftedWords[i];
                     fallbackList.prepend(li);
                 }
             }
@@ -2131,19 +2505,20 @@ function initRound(syncedTime = null) {
 
 function startClock() {
     clearInterval(timerInterval);
-    timerInterval = setInterval(() => {
-        timeLeft--;
-
-        const m = Math.floor(timeLeft / 60).toString().padStart(2, '0');
-        const s = (timeLeft % 60).toString().padStart(2, '0');
+    const paintClock = () => {
+        const m = Math.floor(Math.max(timeLeft, 0) / 60).toString().padStart(2, '0');
+        const s = (Math.max(timeLeft, 0) % 60).toString().padStart(2, '0');
         timerDisplay.textContent = `${m}:${s}`;
-
         if (timeLeft <= 10 && timeLeft > 0) {
             timerDisplay.style.color = 'var(--danger)';
         }
-
         sessionStorage.setItem('wordperfect_time_left', timeLeft.toString());
+    };
 
+    paintClock(); // show the full starting second immediately (no off-by-one first paint)
+    timerInterval = setInterval(() => {
+        timeLeft--;
+        paintClock();
         if (timeLeft <= 0) {
             endRound();
         }
@@ -2151,6 +2526,8 @@ function startClock() {
 }
 
 async function endRound() {
+    if (!roomChannel || isTutorial) return;
+
     clearInterval(timerInterval);
     if (isPlaying && wordInput.value.trim().length >= 4) {
         attemptSubmitWord(wordInput.value);
@@ -2395,6 +2772,7 @@ function attemptSubmitWord(rawWord) {
     if (isPlural(newWord)) {
         console.log("❌ Failed: Plural rule");
         rejectInput("No basic plurals!");
+        if (!isTutorial) { wordAttempts++; wordErrors++; }
         return false;
     }
 
@@ -2543,16 +2921,18 @@ function initPhysics() {
     const fallbackList = document.getElementById('drafted-words');
     if (fallbackList) fallbackList.classList.add('hidden');
 
-    const width = container.clientWidth;
-    const height = container.clientHeight;
+    // Measure the canvas's laid-out box (not the padded container) so the floor
+    // lines up with the visible bottom of the gravity box.
+    const width = Math.max(1, canvas.clientWidth || container.clientWidth);
+    const height = Math.max(1, canvas.clientHeight || container.clientHeight);
     
-    // Scale for high-DPI screens
+    // Scale for high-DPI screens — setTransform avoids compounding on re-init
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = width + 'px';
     canvas.style.height = height + 'px';
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const Engine = Matter.Engine,
           World = Matter.World,
@@ -2560,15 +2940,18 @@ function initPhysics() {
 
     physicsEngine = Engine.create();
     physicsWorld = physicsEngine.world;
-    physicsWorld.gravity.y = 0.5; // soft natural gravity
+    physicsWorld.gravity.y = 0.34; // slightly softer than before (was 0.5)
 
-    // Create boundaries slightly outside the canvas area
-    const floor = Bodies.rectangle(width / 2, height + 20, width + 100, 40, { isStatic: true });
+    // Floor top sits a few px inside the canvas so pills rest fully in-frame
+    const floorThickness = 48;
+    const floorTop = height - 8;
+    const floor = Bodies.rectangle(width / 2, floorTop + floorThickness / 2, width + 80, floorThickness, { isStatic: true });
     const leftWall = Bodies.rectangle(-20, height / 2, 40, height + 100, { isStatic: true });
     const rightWall = Bodies.rectangle(width + 20, height / 2, 40, height + 100, { isStatic: true });
 
     World.add(physicsWorld, [floor, leftWall, rightWall]);
     physicsWordBodies = [];
+    scorePopups = [];
 
     // Animation frame render loop
     function updatePhysicsFrame() {
@@ -2669,9 +3052,9 @@ function addWordToPhysics(word, staggerIndex = 0) {
     // Create capsule body with chamfer corners
     const body = Bodies.rectangle(startX, startY, pillWidth, pillHeight, {
         chamfer: { radius: pillHeight / 2 },
-        restitution: 0.45, // elastic bouncing coefficient
-        friction: 0.15,
-        frictionAir: 0.015
+        restitution: 0.32, // softer bounce with lower gravity
+        friction: 0.18,
+        frictionAir: 0.022
     });
 
     body.wordText = word;
@@ -2679,8 +3062,8 @@ function addWordToPhysics(word, staggerIndex = 0) {
     body.pillHeight = pillHeight;
 
     // Apply soft initial tumble torque and downward force
-    Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.15);
-    Body.setVelocity(body, { x: (Math.random() - 0.5) * 1.5, y: 1.5 });
+    Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.12);
+    Body.setVelocity(body, { x: (Math.random() - 0.5) * 1.2, y: 1.0 });
 
     physicsWordBodies.push(body);
     Matter.World.add(physicsWorld, body);
@@ -2783,6 +3166,8 @@ if (btnToggleAi) {
 
         if (!aiEnabled) {
             myLocalAiPlayers = [];
+            lastKnownAiPlayers = [];
+            saveGameStateToSession();
             await syncMyState();
         } else {
             await reconcileBots(activePlayersList.filter(p => !p.isAi).length);

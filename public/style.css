@@ -797,16 +797,20 @@ body.viewport-locked {
   display: flex;
   flex: 1;
   min-height: 120px;
+  height: 250px;
   max-height: 250px;
-  overflow: hidden;
+  overflow: hidden; /* must clip pills — overflow-y:auto let the floor drift below the visible box */
   position: relative;
   background-color: var(--canvas);
+  padding: 0; /* padding mismatched physics bounds vs visible canvas */
 }
 
 #physics-canvas {
   width: 100%;
   height: 100%;
   display: block;
+  position: absolute;
+  inset: 0;
 }
 
 /* --- ICON WRAPPER BLUR CROSSFADE --- */
@@ -846,18 +850,22 @@ body.viewport-locked {
   color: hsl(140, 80%, 35%);
 }
 
-.draft-container {
-  padding: var(--spacing-sm);
-  height: 250px;
-  overflow-y: auto;
-  position: relative;
-}
-
 .word-list {
   list-style: none;
   display: flex;
   flex-direction: column;
   min-height: 100%;
+  width: 100%;
+  height: 100%;
+  padding: var(--spacing-sm);
+  box-sizing: border-box;
+  overflow-y: auto;
+  position: relative;
+  z-index: 1;
+}
+
+.word-list.hidden {
+  display: none !important;
 }
 
 .word-list:empty::after {
@@ -871,6 +879,128 @@ body.viewport-locked {
   font-style: italic;
   text-align: center;
   opacity: 0.7;
+}
+
+/* Standings / winner stat tooltips */
+.stats-grid {
+  padding-top: 16px;
+  margin-top: 16px;
+  display: flex;
+  justify-content: space-around;
+  text-align: center;
+  gap: 4px;
+}
+
+.stat-cell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  cursor: help;
+  padding: 4px 2px;
+  border-radius: 8px;
+  transition: background-color 160ms var(--ease-out);
+}
+
+.stat-cell:hover,
+.stat-cell:focus-visible {
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+body.dark-theme .stat-cell:hover,
+body.dark-theme .stat-cell:focus-visible {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.stat-cell::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 6px);
+  bottom: auto;
+  transform: translateX(-50%) translateY(-4px);
+  width: max-content;
+  max-width: 150px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--canvas);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: center;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms var(--ease-out), transform 140ms var(--ease-out);
+  z-index: 5;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+}
+
+.stat-cell:hover::after,
+.stat-cell:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Boot loading — spinner + rotating tip */
+.boot-loading {
+  margin-top: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  min-height: 96px;
+}
+
+.boot-loading.hidden {
+  display: none !important;
+}
+
+.boot-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--hairline);
+  border-top-color: var(--ink);
+  animation: boot-spin 0.75s linear infinite;
+}
+
+@keyframes boot-spin {
+  to { transform: rotate(360deg); }
+}
+
+.boot-tip {
+  max-width: 280px;
+  text-align: center;
+  min-height: 2.6em;
+  opacity: 0.75;
+  transition: opacity 220ms var(--ease-out);
+}
+
+.boot-tip.is-fading {
+  opacity: 0;
+}
+
+.boot-controls-enter:not(.hidden) {
+  animation: boot-controls-in 380ms var(--ease-out) both;
+}
+
+@keyframes boot-controls-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-spinner { animation: none; border-top-color: var(--hairline); }
+  .boot-controls-enter:not(.hidden) { animation: none; }
+  .stat-cell::after { transition: none; }
 }
 
 @keyframes itemAppear {
@@ -1154,16 +1284,15 @@ body.viewport-locked {
   align-items: center;
   justify-content: center;
   opacity: 0;
-  transform: scale(0.97);
+  transform: translateY(6px);
   pointer-events: none;
-  transition: opacity 250ms var(--ease-out), transform 250ms var(--ease-out);
+  transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out);
   z-index: 100;
-  will-change: opacity, transform;
 }
 
 .overlay-screen.active {
   opacity: 1;
-  transform: scale(1);
+  transform: translateY(0);
   pointer-events: auto;
 }
 
