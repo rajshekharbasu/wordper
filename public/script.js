@@ -48,6 +48,20 @@ let cachedBoardKey = '';
 let myLocalAiPlayers = [];
 // Host-only: whether a bot should fill in while the host waits alone
 let aiEnabled = true;
+const RECONNECT_WINDOW_MS = 3 * 60 * 1000;
+let disconnectedSeats = [];
+let lastKnownDisconnectedSeats = [];
+let previousLivePlayers = [];
+let recentDepartedPlayers = [];
+let intentionalLeavers = new Set();
+let draftSnapshots = {};
+let reclaimRequestPending = false;
+let reclaimingSeat = false;
+let connectionLost = false;
+let reconnectInProgress = false;
+let recoveringAsFormerHost = false;
+let reconnectCleanupTimer = null;
+const intentionallyClosedChannels = new WeakSet();
 const btnOpenTutorial = document.getElementById('btnOpenTutorial');
 
 // Escape user-controlled strings before interpolating into innerHTML
@@ -72,7 +86,7 @@ function getHostPlayerId() {
 }
 
 function getElectedHostId() {
-    const realPlayers = activePlayersList.filter(p => !p.isAi);
+    const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
     if (realPlayers.length === 0) return null;
     return [...realPlayers]
         .map(p => p.id)
@@ -181,6 +195,8 @@ let physicsEngine = null;
 let physicsWorld = null;
 let physicsWordBodies = [];
 let physicsAnimId = null;
+let physicsResizeTimer = null;
+let physicsLayoutSize = '';
 let scorePopups = []; // non-physics particles: {x, y, text, bornAt} — drawn on top of pills
 
 const SCORE_POPUP_DELAY_MS = 600;
@@ -223,6 +239,7 @@ const screenResults = document.getElementById('screen-results');
 const screenStandings = document.getElementById('screen-standings');
 const screenWinner = document.getElementById('screen-winner');
 const penaltyModal = document.getElementById('penalty-modal');
+const connectionErrorModal = document.getElementById('connection-error-modal');
 
 // Controls
 const bootStatus = document.getElementById('boot-status');
@@ -266,6 +283,9 @@ const btnPlayAgain = document.getElementById('btn-play-again');
 const guestWaitingMsg = document.getElementById('guest-waiting-msg');
 const penStatus = document.getElementById('penalty-status');
 const penTimerEl = document.getElementById('penalty-timer');
+const btnRejoinGame = document.getElementById('btn-rejoin-game');
+const btnConnectionLeave = document.getElementById('btn-connection-leave');
+const connectionRetryStatus = document.getElementById('connection-retry-status');
 
 function showOverlay(element) { element.classList.add('active'); }
 function hideOverlay(element) { element.classList.remove('active'); }
@@ -346,6 +366,7 @@ function confirmRoomExists() {
     roomProbeTimer = null;
     setJoinBusy(false);
     hideJoinStatus();
+    syncMyState();
     revealRoom();
 }
 
@@ -484,7 +505,7 @@ async function bootEngine() {
                 }
             }
             
-            await joinRealtimeRoom(savedRoom, savedName, savedIsHost);
+            await joinRealtimeRoom(savedRoom, savedName, savedIsHost, true);
         } else {
             // Check for room code in URL params to auto-fill
             const urlParams = new URLSearchParams(window.location.search);
@@ -567,6 +588,130 @@ if (lobbyModeToggle) {
 
 // --- SUPABASE REALTIME LOGIC ---
 
+function makeDisconnectedSeat(player) {
+    const snapshot = draftSnapshots[player.id];
+    return {
+        id: player.id,
+        name: player.name,
+        score: Number(player.score) || 0,
+        totalWords: Number(player.totalWords) || 0,
+        wordAttempts: Number(player.wordAttempts) || 0,
+        wordErrors: Number(player.wordErrors) || 0,
+        isReady: false,
+        isHost: false,
+        isAi: false,
+        isDisconnected: true,
+        disconnectedAt: Date.now(),
+        reconnectUntil: Date.now() + RECONNECT_WINDOW_MS,
+        disconnectedRound: currentRound,
+        draftedWords: snapshot && snapshot.round === currentRound
+            ? [...snapshot.words]
+            : [],
+        updatedAt: Date.now()
+    };
+}
+
+function rememberDepartedPlayers(departed) {
+    if (!departed.length) return false;
+    recentDepartedPlayers = departed.map(player => ({ ...player }));
+    if (!isHost) return false;
+
+    let changed = false;
+    departed.forEach(player => {
+        if (intentionalLeavers.has(player.id)) {
+            intentionalLeavers.delete(player.id);
+            return;
+        }
+        if (disconnectedSeats.some(seat => seat.id === player.id)) return;
+        const seat = makeDisconnectedSeat(player);
+        disconnectedSeats.push(seat);
+        if (!roundFinalized && boardLetters.length === 16) {
+            hostSubmissions[seat.id] = sanitizeSubmittedWords(seat.draftedWords);
+        }
+        scheduleDisconnectedSeatCleanup();
+        changed = true;
+    });
+    return changed;
+}
+
+function reconcileDisconnectedSeats(livePlayers) {
+    if (!isHost || disconnectedSeats.length === 0) return false;
+    const liveIds = new Set(livePlayers.map(player => player.id));
+    const before = disconnectedSeats.length;
+    disconnectedSeats = disconnectedSeats.filter(seat => !liveIds.has(seat.id));
+    if (disconnectedSeats.length !== before) scheduleDisconnectedSeatCleanup();
+    return disconnectedSeats.length !== before;
+}
+
+function dropDisconnectedSeatsForNextRound() {
+    if (!isHost || disconnectedSeats.length === 0) return;
+    const now = Date.now();
+    disconnectedSeats = disconnectedSeats.filter(
+        seat => seat.disconnectedRound >= currentRound || seat.reconnectUntil > now
+    );
+    scheduleDisconnectedSeatCleanup();
+}
+
+function scheduleDisconnectedSeatCleanup() {
+    clearTimeout(reconnectCleanupTimer);
+    reconnectCleanupTimer = null;
+    if (!isHost || disconnectedSeats.length === 0) return;
+
+    const now = Date.now();
+    const futureExpiries = disconnectedSeats
+        .map(seat => seat.reconnectUntil)
+        .filter(expiry => expiry > now);
+    if (futureExpiries.length === 0) return;
+    const nextExpiry = Math.min(...futureExpiries);
+    const delay = nextExpiry - now;
+    reconnectCleanupTimer = setTimeout(async () => {
+        reconnectCleanupTimer = null;
+        const before = disconnectedSeats.length;
+        dropDisconnectedSeatsForNextRound();
+        if (disconnectedSeats.length !== before) await syncMyState();
+    }, delay);
+}
+
+function restoreClaimedSeat(seat) {
+    myPlayerId = seat.id;
+    sessionStorage.setItem('wordperfect_player_id', myPlayerId);
+    myTotalScore = Number(seat.score) || 0;
+    myTotalWords = Number(seat.totalWords) || 0;
+    wordAttempts = Number(seat.wordAttempts) || 0;
+    wordErrors = Number(seat.wordErrors) || 0;
+    draftedWords = Array.isArray(seat.draftedWords) ? [...seat.draftedWords] : [];
+
+    sessionStorage.setItem('wordperfect_total_score', String(myTotalScore));
+    sessionStorage.setItem('wordperfect_total_words', String(myTotalWords));
+    sessionStorage.setItem('wordperfect_word_attempts', String(wordAttempts));
+    sessionStorage.setItem('wordperfect_word_errors', String(wordErrors));
+    sessionStorage.setItem(
+        `wordperfect_drafted_${myRoomCode}_round_${seat.disconnectedRound}`,
+        JSON.stringify(draftedWords)
+    );
+    totalScoreDisplay.textContent = `Total: ${myTotalScore} pts`;
+}
+
+function showConnectionError(message = 'Rejoin within 3 minutes to reclaim your seat, score, and current-round words.') {
+    connectionLost = true;
+    reconnectInProgress = false;
+    clearInterval(timerInterval);
+    timerInterval = null;
+    connectionRetryStatus.textContent = message;
+    connectionRetryStatus.classList.remove('is-error');
+    btnRejoinGame.disabled = false;
+    btnRejoinGame.textContent = 'Rejoin game';
+    showOverlay(connectionErrorModal);
+}
+
+function setReconnectBusy(busy, message = '') {
+    reconnectInProgress = busy;
+    btnRejoinGame.disabled = busy;
+    btnRejoinGame.textContent = busy ? 'Rejoining…' : 'Rejoin game';
+    connectionRetryStatus.textContent = message;
+    connectionRetryStatus.classList.toggle('is-error', !busy && !!message);
+}
+
 
 async function syncMyState() {
     if (!roomChannel) return;
@@ -583,6 +728,7 @@ async function syncMyState() {
         wordErrors: wordErrors,
         isHost: isHost,
         isPlaying: isPlaying,
+        isPendingJoin: awaitingHostConfirm && !reclaimingSeat,
         updatedAt: Date.now() // FIX: Forces Supabase to broadcast the change
     };
 
@@ -591,6 +737,7 @@ async function syncMyState() {
         trackPayload.roundTime = secondsPerRound;
         trackPayload.scoreMode = scoreMode;
         trackPayload.aiPlayers = myLocalAiPlayers;
+        trackPayload.disconnectedSeats = disconnectedSeats;
     }
 
     await roomChannel.track(trackPayload);
@@ -599,7 +746,7 @@ async function syncMyState() {
 async function maybeElectNewHost() {
     if (!roomChannel || hostElectionInProgress) return;
 
-    const realPlayers = activePlayersList.filter(p => !p.isAi);
+    const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
     if (realPlayers.length === 0) return;
     if (realPlayers.some(p => p.isHost)) return;
 
@@ -614,6 +761,17 @@ async function maybeElectNewHost() {
         isHost = true;
         lastKnownHostId = myPlayerId;
         sessionStorage.setItem('wordperfect_is_host', 'true');
+
+        disconnectedSeats = lastKnownDisconnectedSeats.map(seat => ({ ...seat }));
+        recentDepartedPlayers.forEach(player => {
+            if (
+                player.id === myPlayerId ||
+                intentionalLeavers.has(player.id) ||
+                disconnectedSeats.some(seat => seat.id === player.id)
+            ) return;
+            disconnectedSeats.push(makeDisconnectedSeat(player));
+        });
+        scheduleDisconnectedSeatCleanup();
 
         // Adopt the previous host's bots (presence drops them with the old host)
         if (myLocalAiPlayers.length === 0 && lastKnownAiPlayers.length > 0) {
@@ -647,10 +805,12 @@ async function maybeElectNewHost() {
     }
 }
 
-async function joinRealtimeRoom(code, name, hostFlag) {
+async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     myRoomCode = code;
     myPlayerName = name;
     isHost = hostFlag;
+    recoveringAsFormerHost = hostFlag && isRecovery;
+    if (!hostFlag && !isPlaying && !reclaimingSeat) awaitingHostConfirm = true;
 
     // Persist session details across page refreshes
     sessionStorage.setItem('wordperfect_room', code);
@@ -660,6 +820,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
     // Tear down any previous channel so re-join doesn't orphan listeners / ghost presence
     if (roomChannel) {
         try {
+            intentionallyClosedChannels.add(roomChannel);
             await roomChannel.unsubscribe();
         } catch (e) {
             console.error('Error unsubscribing previous channel:', e);
@@ -679,12 +840,14 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             }
         }
     });
+    const channel = roomChannel;
 
     // 1. Presence Sync (Lobby Updates)
     const handlePresenceUpdate = () => {
-        const state = roomChannel.presenceState();
+        if (channel !== roomChannel) return;
+        const state = channel.presenceState();
 
-        activePlayersList = [];
+        const livePresencePlayers = [];
         let aiPlayersToAppend = [];
         for (const id in state) {
             if (state[id] && state[id].length > 0) {
@@ -692,7 +855,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                 const playerStates = state[id];
                 playerStates.sort((a, b) => b.updatedAt - a.updatedAt);
                 const activeState = playerStates[0];
-                activePlayersList.push(activeState);
+                livePresencePlayers.push(activeState);
                 
                 // If this connected player is the host and has bots, save them
                 if (activeState.isHost && activeState.aiPlayers) {
@@ -700,9 +863,41 @@ async function joinRealtimeRoom(code, name, hostFlag) {
                 }
             }
         }
-        
-        // Append bots to the players list
-        activePlayersList = [...activePlayersList, ...aiPlayersToAppend];
+
+        const anotherHost = livePresencePlayers.find(
+            player => player.isHost && !player.isAi && player.id !== myPlayerId
+        );
+        if (isHost && recoveringAsFormerHost && anotherHost) {
+            isHost = false;
+            disconnectedSeats = [];
+            sessionStorage.setItem('wordperfect_is_host', 'false');
+            const myLiveState = livePresencePlayers.find(player => player.id === myPlayerId);
+            if (myLiveState) myLiveState.isHost = false;
+            syncMyState();
+        }
+        const liveIds = new Set(livePresencePlayers.map(player => player.id));
+        const departed = previousLivePlayers.filter(
+            player => !liveIds.has(player.id) && !player.isPendingJoin
+        );
+        previousLivePlayers = livePresencePlayers
+            .filter(player => !player.isAi)
+            .map(player => ({ ...player }));
+        const departedChanged = rememberDepartedPlayers(departed);
+        const reclaimedChanged = reconcileDisconnectedSeats(livePresencePlayers);
+
+        const liveHost = livePresencePlayers.find(p => p.isHost && !p.isAi);
+        if (liveHost && Array.isArray(liveHost.disconnectedSeats)) {
+            lastKnownDisconnectedSeats = liveHost.disconnectedSeats.map(seat => ({ ...seat }));
+        }
+        const seatsForRoster = isHost
+            ? disconnectedSeats
+            : (liveHost && Array.isArray(liveHost.disconnectedSeats) ? liveHost.disconnectedSeats : []);
+
+        // A pending guest is only probing the room. It becomes visible after lobby
+        // validation, or after the host grants a disconnected-seat claim.
+        const visibleLivePlayers = livePresencePlayers.filter(player => !player.isPendingJoin);
+        activePlayersList = [...visibleLivePlayers, ...aiPlayersToAppend, ...seatsForRoster];
+        if (isHost && (departedChanged || reclaimedChanged)) syncMyState();
 
         // Cache bots whenever we see them — host leave removes them from presence, but
         // the elected replacement still needs the roster mid-round.
@@ -710,11 +905,10 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             lastKnownAiPlayers = aiPlayersToAppend.map(b => ({ ...b }));
         }
 
-        const liveHost = activePlayersList.find(p => p.isHost && !p.isAi);
         if (liveHost) lastKnownHostId = liveHost.id;
 
         // Guest synchronizes with the host's settings (maxRounds, secondsPerRound) in real-time
-        const hostPlayer = activePlayersList.find(p => p.isHost);
+        const hostPlayer = liveHost;
         if (hostPlayer) {
             if (!isHost) {
                 let settingsChanged = false;
@@ -747,7 +941,7 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         }
 
         // A lone host gets a bot automatically; the toggle stays visible so they can opt out
-        const realPlayerCount = activePlayersList.filter(p => !p.isAi).length;
+        const realPlayerCount = activePlayersList.filter(p => !p.isAi && !p.isDisconnected).length;
         const aiToastEl = document.getElementById('ai-toast');
         if (aiToastEl) {
             aiToastEl.classList.toggle('visible', isHost && realPlayerCount === 1 && !isPlaying);
@@ -761,7 +955,8 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
         // Host checks if everyone is ready to start
         if (isHost && activePlayersList.length > 0) {
-            const allReady = activePlayersList.every(p => p.isReady);
+            const readyPlayers = activePlayersList.filter(p => !p.isDisconnected);
+            const allReady = readyPlayers.length > 0 && readyPlayers.every(p => p.isReady);
 
             if (allReady && !isPlaying) {
                 console.log("Host detected all players are ready. Starting game...");
@@ -774,8 +969,20 @@ async function joinRealtimeRoom(code, name, hostFlag) {
         // is already live (late joins softlock finalize by becoming required submitters).
         if (awaitingHostConfirm && activePlayersList.some(p => p.isHost)) {
             const hostPlayer = activePlayersList.find(p => p.isHost);
-            if (hostPlayer && hostPlayer.isPlaying) {
-                failJoin('That game is already in progress. Try again after it ends.');
+            const claimableSeat = seatsForRoster.find(seat => nameKey(seat.name) === nameKey(myPlayerName));
+            if (reclaimRequestPending) {
+                // The host may publish the seat removal before our targeted grant arrives.
+                // Keep waiting rather than turning that harmless ordering race into a denial.
+            } else if (claimableSeat) {
+                reclaimRequestPending = true;
+                showJoinStatus('Reclaiming your seat…', false);
+                channel.send({
+                    type: 'broadcast',
+                    event: 'claim_seat',
+                    payload: { requesterId: myPlayerId, name: myPlayerName }
+                });
+            } else if (hostPlayer && hostPlayer.isPlaying) {
+                failJoin('That game is already in progress. Only disconnected players can rejoin.');
             } else if (findNameClash(activePlayersList, myPlayerName, myPlayerId)) {
                 failJoin(NAME_TAKEN_MSG, inputPlayerName, 'TAKEN');
             } else {
@@ -796,6 +1003,75 @@ async function joinRealtimeRoom(code, name, hostFlag) {
     roomChannel.on('presence', { event: 'leave' }, handlePresenceUpdate);
 
     // 2. Broadcasts (The Game Engine)
+    roomChannel.on('broadcast', { event: 'draft_snapshot' }, (response) => {
+        const data = getBroadcastData(response);
+        if (!data.playerId || !Array.isArray(data.words)) return;
+        draftSnapshots[data.playerId] = {
+            round: Number(data.round) || currentRound,
+            words: sanitizeSubmittedWords(data.words)
+        };
+        if (!isHost) return;
+        const seat = disconnectedSeats.find(item => item.id === data.playerId);
+        if (seat && seat.disconnectedRound === draftSnapshots[data.playerId].round) {
+            seat.draftedWords = [...draftSnapshots[data.playerId].words];
+            syncMyState();
+        }
+    });
+
+    roomChannel.on('broadcast', { event: 'intentional_leave' }, (response) => {
+        const data = getBroadcastData(response);
+        if (!data.playerId) return;
+        intentionalLeavers.add(data.playerId);
+        if (!isHost) return;
+        disconnectedSeats = disconnectedSeats.filter(seat => seat.id !== data.playerId);
+        delete draftSnapshots[data.playerId];
+        scheduleDisconnectedSeatCleanup();
+        syncMyState();
+    });
+
+    roomChannel.on('broadcast', { event: 'claim_seat' }, async (response) => {
+        if (!isHost) return;
+        const data = getBroadcastData(response);
+        const seat = disconnectedSeats.find(item => nameKey(item.name) === nameKey(data.name));
+        if (!seat || !data.requesterId) {
+            await roomChannel.send({
+                type: 'broadcast',
+                event: 'claim_denied',
+                payload: { requesterId: data.requesterId }
+            });
+            return;
+        }
+
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'claim_granted',
+            payload: { requesterId: data.requesterId, seat, isPlaying }
+        });
+        disconnectedSeats = disconnectedSeats.filter(item => item.id !== seat.id);
+        lastKnownDisconnectedSeats = disconnectedSeats.map(item => ({ ...item }));
+        scheduleDisconnectedSeatCleanup();
+        await syncMyState();
+    });
+
+    roomChannel.on('broadcast', { event: 'claim_granted' }, async (response) => {
+        const data = getBroadcastData(response);
+        if (data.requesterId !== myPlayerId || !data.seat) return;
+
+        reclaimRequestPending = false;
+        reclaimingSeat = true;
+        awaitingHostConfirm = false;
+        restoreClaimedSeat(data.seat);
+        isPlaying = data.isPlaying === true;
+        await joinRealtimeRoom(myRoomCode, data.seat.name, false);
+    });
+
+    roomChannel.on('broadcast', { event: 'claim_denied' }, (response) => {
+        const data = getBroadcastData(response);
+        if (data.requesterId !== myPlayerId) return;
+        reclaimRequestPending = false;
+        failJoin('That reconnect seat is no longer available. Ask the host to start a new game.');
+    });
+
     roomChannel.on('broadcast', { event: 'trigger_game' }, (response) => {
         console.log("Raw trigger_game response:", response); // For debugging
 
@@ -1078,7 +1354,13 @@ async function joinRealtimeRoom(code, name, hostFlag) {
 
     // 3. Subscribe
     roomChannel.subscribe(async (status) => {
+        if (channel !== roomChannel) return;
         if (status === 'SUBSCRIBED') {
+            connectionLost = false;
+            reconnectInProgress = false;
+            reclaimingSeat = false;
+            reclaimRequestPending = false;
+            hideOverlay(connectionErrorModal);
             // Configure lobby settings sliders for Host vs Guest
             if (isHost) {
                 lobbyInputRounds.disabled = false;
@@ -1136,14 +1418,13 @@ async function joinRealtimeRoom(code, name, hostFlag) {
             }
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
             console.error("Supabase Realtime Subscription Error:", status);
-            // Don't sessionStorage.clear() — that also wipes theme and unrelated keys
-            clearGameStateFromSession();
-            sessionStorage.removeItem('wordperfect_room');
-            sessionStorage.removeItem('wordperfect_name');
-            sessionStorage.removeItem('wordperfect_is_host');
-            alert("Failed to connect to the game server. Please try again.");
-            // Reset URL parameters and return home
-            window.location.href = window.location.origin + window.location.pathname;
+            showConnectionError(
+                reconnectInProgress
+                    ? 'Rejoin failed. Check your connection and try again.'
+                    : undefined
+            );
+        } else if (status === 'CLOSED' && !intentionallyClosedChannels.has(channel)) {
+            showConnectionError();
         }
     });
 }
@@ -1153,6 +1434,7 @@ async function startGameAsHost() {
     isPlaying = true; // FIX: Lock the game state so this doesn't double-fire
     hostSubmissions = {};
     roundFinalized = false;
+    dropDisconnectedSeatsForNextRound();
     cachedBoardWords = null;
     cachedBoardKey = '';
     const newBoard = [];
@@ -1162,6 +1444,7 @@ async function startGameAsHost() {
 
     boardLetters = newBoard;
     saveGameStateToSession();
+    await syncMyState();
 
     await roomChannel.send({
         type: 'broadcast',
@@ -1273,7 +1556,7 @@ function generateBotWords(bot, allValidWords, humanWordSet) {
 function maybeFinalizeRound() {
     if (!isHost || roundFinalized) return;
 
-    const realPlayers = activePlayersList.filter(p => !p.isAi);
+    const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
     if (realPlayers.length === 0) return;
 
     // Submissions from players who have since left must not count toward the total,
@@ -1289,6 +1572,8 @@ function finalizeRound() {
     roundFinalized = true; // one scoring pass per round, whichever trigger gets here first
     clearTimeout(finalizeWatchdog);
     finalizeWatchdog = null;
+    clearTimeout(reconnectCleanupTimer);
+    reconnectCleanupTimer = null;
     calculateScoresAndBroadcast();
 }
 
@@ -1378,8 +1663,20 @@ async function calculateScoresAndBroadcast() {
         if (!scored) return bot;
         return { ...bot, score: scored.score, totalWords: scored.totalWords || 0, updatedAt: Date.now() };
     });
+    disconnectedSeats = disconnectedSeats.map(seat => {
+        const scored = tempPlayers.find(player => player.id === seat.id);
+        if (!scored) return seat;
+        return {
+            ...seat,
+            score: scored.score,
+            totalWords: scored.totalWords || 0,
+            updatedAt: Date.now()
+        };
+    });
+    lastKnownDisconnectedSeats = disconnectedSeats.map(seat => ({ ...seat }));
     lastKnownAiPlayers = myLocalAiPlayers.map(b => ({ ...b }));
     saveGameStateToSession();
+    if (isHost) await syncMyState();
 
     await roomChannel.send({
         type: 'broadcast',
@@ -1473,12 +1770,21 @@ async function leaveRoomAndGoHome() {
     finalizeWatchdog = null;
     clearTimeout(roomProbeTimer);
     roomProbeTimer = null;
+    clearTimeout(physicsResizeTimer);
+    physicsResizeTimer = null;
+    physicsLayoutSize = '';
     awaitingHostConfirm = false;
     setJoinBusy(false);
     document.body.classList.remove('counting-down', 'penalized');
 
     if (roomChannel) {
         try {
+            await roomChannel.send({
+                type: 'broadcast',
+                event: 'intentional_leave',
+                payload: { playerId: myPlayerId }
+            });
+            intentionallyClosedChannels.add(roomChannel);
             await roomChannel.unsubscribe();
         } catch (e) {
             console.error("Error unsubscribing:", e);
@@ -1506,6 +1812,17 @@ async function leaveRoomAndGoHome() {
     wordErrors = 0;
     myLocalAiPlayers = [];
     lastKnownAiPlayers = [];
+    disconnectedSeats = [];
+    lastKnownDisconnectedSeats = [];
+    previousLivePlayers = [];
+    recentDepartedPlayers = [];
+    intentionalLeavers.clear();
+    draftSnapshots = {};
+    reclaimRequestPending = false;
+    reclaimingSeat = false;
+    connectionLost = false;
+    reconnectInProgress = false;
+    recoveringAsFormerHost = false;
     aiEnabled = true;
     isReady = false;
     isHost = false;
@@ -1532,6 +1849,7 @@ async function leaveRoomAndGoHome() {
         screenLobby, screenCountdown, screenResults,
         screenStandings, screenWinner, penaltyModal,
         document.getElementById('confirm-leave-modal'),
+        connectionErrorModal,
         document.getElementById('rules-recap-modal')
     ];
     overlays.forEach(o => {
@@ -1885,10 +2203,12 @@ function renderLobbyPlayers(players) {
     lobbyPlayerList.innerHTML = '';
     players.forEach((p, index) => {
         const li = document.createElement('li');
-        li.className = `lobby-player-item ${p.isAi ? 'ai-player' : ''}`;
+        li.className = `lobby-player-item ${p.isAi ? 'ai-player' : ''} ${p.isDisconnected ? 'reconnecting-player' : ''}`;
         li.style.animationDelay = `${index * 50}ms`;
         
-        const readyIndicator = p.isReady
+        const readyIndicator = p.isDisconnected
+            ? `<span class="ready-indicator reconnecting-indicator" title="Reconnecting"></span>`
+            : p.isReady
             ? `<span class="ready-indicator ready" title="Ready"></span>`
             : `<span class="ready-indicator" title="Not Ready"></span>`;
             
@@ -1897,6 +2217,7 @@ function renderLobbyPlayers(players) {
         li.innerHTML = `
             <div class="player-info-group">
                 <span class="player-name">${nameDisplay}</span>
+                ${p.isDisconnected ? '<span class="reconnecting-label">Reconnecting…</span>' : ''}
                 ${p.isAi ? (isHost ? `
                 <div style="display: flex; align-items: center; gap: 8px;">
                     <select class="ai-difficulty-select-pill" data-ai-id="${escapeHtml(p.id)}">
@@ -2548,6 +2869,12 @@ async function endRound() {
 
     actionBtn.textContent = 'Calculating...';
 
+    if (isHost) {
+        disconnectedSeats.forEach(seat => {
+            hostSubmissions[seat.id] = sanitizeSubmittedWords(seat.draftedWords || []);
+        });
+    }
+
     // Broadcast drafted words for the host to process
     await roomChannel.send({
         type: 'broadcast',
@@ -2784,6 +3111,17 @@ function attemptSubmitWord(rawWord) {
     // Save update to sessionStorage
     const cacheKey = `wordperfect_drafted_${myRoomCode}_round_${currentRound}`;
     sessionStorage.setItem(cacheKey, JSON.stringify(draftedWords));
+    if (!isTutorial && roomChannel) {
+        roomChannel.send({
+            type: 'broadcast',
+            event: 'draft_snapshot',
+            payload: {
+                playerId: myPlayerId,
+                round: currentRound,
+                words: draftedWords
+            }
+        });
+    }
 
     if (typeof Matter !== 'undefined' && physicsWorld) {
         addWordToPhysics(newWord);
@@ -2905,6 +3243,7 @@ function initPhysics() {
         physicsEngine = null;
         physicsWorld = null;
         physicsWordBodies = [];
+        physicsLayoutSize = '';
 
         // Hide canvas and show fallback DOM list
         canvas.classList.add('hidden');
@@ -2925,6 +3264,7 @@ function initPhysics() {
     // lines up with the visible bottom of the gravity box.
     const width = Math.max(1, canvas.clientWidth || container.clientWidth);
     const height = Math.max(1, canvas.clientHeight || container.clientHeight);
+    physicsLayoutSize = `${Math.round(width)}x${Math.round(height)}`;
     
     // Scale for high-DPI screens — setTransform avoids compounding on re-init
     const dpr = window.devicePixelRatio || 1;
@@ -2974,6 +3314,38 @@ function initPhysics() {
     }
     updatePhysicsFrame();
 }
+
+// The desktop layout can change after fonts load, browser chrome moves, or the window
+// resizes. Rebuild the boundaries only when the gravity box's rendered size changed;
+// otherwise Matter keeps using a stale floor while the canvas paints at its new size.
+function schedulePhysicsLayoutRefresh() {
+    if (!physicsEngine || !isPlaying || window.innerWidth <= 768) return;
+
+    const canvas = document.getElementById('physics-canvas');
+    if (!canvas || canvas.classList.contains('hidden')) return;
+
+    const nextSize = `${Math.round(canvas.clientWidth)}x${Math.round(canvas.clientHeight)}`;
+    if (nextSize === physicsLayoutSize || nextSize === '0x0') return;
+
+    clearTimeout(physicsResizeTimer);
+    physicsResizeTimer = setTimeout(() => {
+        physicsResizeTimer = null;
+        const wordsToRestore = [...draftedWords];
+        initPhysics();
+
+        for (let i = wordsToRestore.length - 1; i >= 0; i--) {
+            const staggerIndex = (wordsToRestore.length - 1) - i;
+            addWordToPhysics(wordsToRestore[i], staggerIndex);
+        }
+    }, 120);
+}
+
+const gravityBox = document.querySelector('.draft-container');
+if (gravityBox && typeof ResizeObserver !== 'undefined') {
+    const gravityBoxObserver = new ResizeObserver(schedulePhysicsLayoutRefresh);
+    gravityBoxObserver.observe(gravityBox);
+}
+window.addEventListener('resize', schedulePhysicsLayoutRefresh);
 
 function drawPill(ctx, x, y, width, height, angle, text) {
     ctx.save();
@@ -3137,6 +3509,34 @@ if (btnConfirmLeave) {
 }
 if (btnCancelLeave) btnCancelLeave.addEventListener('click', dismissLeaveConfirm);
 
+if (btnRejoinGame) {
+    btnRejoinGame.addEventListener('click', async () => {
+        if (reconnectInProgress) return;
+        const savedRoom = sessionStorage.getItem('wordperfect_room') || myRoomCode;
+        const savedName = sessionStorage.getItem('wordperfect_name') || myPlayerName;
+        if (!savedRoom || !savedName) {
+            await leaveRoomAndGoHome();
+            return;
+        }
+
+        setReconnectBusy(true, 'Connecting to your room…');
+        try {
+            // In a multiplayer room, failover continues immediately. A returning former
+            // host comes back as a normal player; a truly solo host still owns its room.
+            const otherConnectedPlayers = previousLivePlayers.filter(player => player.id !== myPlayerId);
+            const shouldRemainHost = isHost && otherConnectedPlayers.length === 0;
+            await joinRealtimeRoom(savedRoom, savedName, shouldRemainHost, true);
+        } catch (error) {
+            console.error('Reconnect attempt failed:', error);
+            setReconnectBusy(false, 'Rejoin failed. Check your connection and try again.');
+        }
+    });
+}
+
+if (btnConnectionLeave) {
+    btnConnectionLeave.addEventListener('click', leaveRoomAndGoHome);
+}
+
 // The recap is deliberately read-only: it opens over the results screen and touches no
 // game state, so a player mid-game can check the rules without forfeiting anything.
 if (btnIdleRefresher) btnIdleRefresher.addEventListener('click', () => showOverlay(rulesRecapModal));
@@ -3170,7 +3570,7 @@ if (btnToggleAi) {
             saveGameStateToSession();
             await syncMyState();
         } else {
-            await reconcileBots(activePlayersList.filter(p => !p.isAi).length);
+            await reconcileBots(activePlayersList.filter(p => !p.isAi && !p.isDisconnected).length);
         }
     });
 }

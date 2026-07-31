@@ -158,12 +158,19 @@
 
         <!-- AI Bot suggestion toast -->
         <div id="ai-toast" class="utility-card bot-toast">
-            <div style="display: flex; flex-direction: column; gap: 2px;">
-                <span class="body-strong" style="font-size: 14px; letter-spacing: -0.1px;">Play with a Bot</span>
-                <span class="caption text-muted">Leaves when another player joins</span>
+            <div class="bot-toast-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="5" y="7" width="14" height="11" rx="4"></rect>
+                    <path d="M12 3v4M8.5 12h.01M15.5 12h.01M9 15h6"></path>
+                </svg>
+            </div>
+            <div class="bot-toast-copy">
+                <span class="body-strong bot-toast-title">Play with a Bot</span>
+                <span class="caption text-muted">Keeps you company until a friend joins</span>
             </div>
             <button id="btn-toggle-ai" class="ai-switch" type="button" role="switch" aria-checked="true"
-                title="Play with a Bot">
+                aria-label="Play with a Bot" title="Play with a Bot">
                 <span class="ai-switch-thumb"></span>
             </button>
         </div>
@@ -335,7 +342,33 @@
         </div>
     </div>
 
-    <!-- OVERLAY 8: Quick Rules Recap (safe to open mid-game — changes no game state) -->
+    <!-- OVERLAY 8: Connection recovery -->
+    <div id="connection-error-modal" class="overlay-screen dialog-scrim" role="dialog" aria-modal="true"
+        aria-labelledby="connection-error-title" aria-describedby="connection-error-body">
+        <div class="dialog-card connection-dialog">
+            <div class="connection-dialog-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+                    <path d="M8.5 16a6 6 0 0 1 7 0"></path>
+                    <path d="M12 20h.01"></path>
+                    <path d="M3 3l18 18"></path>
+                </svg>
+            </div>
+            <p class="caption-strong connection-eyebrow">CONNECTION LOST</p>
+            <h2 id="connection-error-title" class="display-md dialog-title">You’re still in the game.</h2>
+            <p id="connection-error-body" class="body dialog-body">
+                Rejoin within 3 minutes to reclaim your seat, score, and current-round words.
+            </p>
+            <p id="connection-retry-status" class="caption connection-retry-status" aria-live="polite"></p>
+            <div class="dialog-actions">
+                <button id="btn-rejoin-game" class="button-primary" type="button">Rejoin game</button>
+                <button id="btn-connection-leave" class="button-ghost" type="button">Leave to home</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- OVERLAY 9: Quick Rules Recap (safe to open mid-game — changes no game state) -->
     <div id="rules-recap-modal" class="overlay-screen dialog-scrim">
         <div class="dialog-card">
             <h2 class="display-md dialog-title">Quick refresher</h2>
