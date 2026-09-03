@@ -16,6 +16,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+// Ripple spinner + countdown digits from flicker-dot (Made with Flicker · flicker.laurie.fyi)
+let countdownFlickerMarkup = '';
+
+(function injectFlickerSpinner() {
+    const host = document.getElementById('boot-spinner-host');
+    fetch('flicker-boot.svg')
+        .then((r) => (r.ok ? r.text() : Promise.reject()))
+        .then((svg) => {
+            if (host) host.innerHTML = svg;
+        })
+        .catch(() => {
+            if (host) host.classList.add('boot-spinner-fallback');
+        });
+
+    fetch('flicker-countdown.svg')
+        .then((r) => (r.ok ? r.text() : Promise.reject()))
+        .then((svg) => { countdownFlickerMarkup = svg; })
+        .catch(() => {});
+})();
+
 // --- NETWORK STATE (SUPABASE) ---
 const SUPABASE_URL = 'https://lnjcbqdcaikndbllyhkc.supabase.co'; // Keep your actual URL
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxuamNicWRjYWlrbmRibGx5aGtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3ODIyNjgsImV4cCI6MjA5MzM1ODI2OH0.zIt87ajVwBUEstCiQdHbrqUWRmEcQvrcRmY109bT_QE'; // Keep your actual Key
@@ -382,11 +402,11 @@ async function failJoin(message, field = inputRoomCode, hint = 'NO ROOM') {
 
 // --- BOOT SEQUENCE ---
 const BOOT_TIPS = [
-    'Tip: Unique words score. Shared words cancel for everyone.',
-    'Tip: No basic plurals — RAIN works, RAINS does not.',
-    'Tip: Longer words pay more in Classic. Rare letters pay more in Scrabble.',
-    'Tip: Lock in early if you are done — no need to wait out the clock.',
-    'Tip: Obscure finds beat obvious ones when the room is sharp.',
+    'If two of you found it, nobody gets it.',
+    'RAIN scores. RAINS is just the S talking.',
+    'Classic pays for length. Scrabble pays for the ugly letters.',
+    'Done early? Lock in. The clock will not miss you.',
+    'The obvious word is the one everyone else typed too.',
 ];
 
 let bootTipTimer = null;
@@ -520,7 +540,7 @@ async function bootEngine() {
         bootStatus.textContent = 'Network Error. Could not load dictionary.';
         const tipEl = document.getElementById('boot-tip');
         if (tipEl) tipEl.textContent = 'Check your connection and refresh to try again.';
-        const spinner = document.querySelector('.boot-spinner');
+        const spinner = document.querySelector('.boot-spinner') || document.getElementById('boot-spinner-host');
         if (spinner) spinner.style.display = 'none';
     }
 }
@@ -1241,11 +1261,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             // co-author of a cancelled duplicate — liking your own word notifies no one.
             const iAmAuthor = res.authors.includes(myPlayerName);
             const heartHtml = iAmAuthor ? '' : `
-                        <button type="button" class="heart-btn" title="Like this word">
+                        <button type="button" class="heart-btn" title="Like this word" aria-label="Like this word" aria-pressed="false">
                             <svg class="heart-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
                             </svg>
-                            <span class="heart-count hidden">0</span>
                         </button>`;
 
             li.innerHTML = `
@@ -1348,7 +1367,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         updateWordLikeUI(data.word, data.likerName, data.liked);
         // Only the like transition toasts the author, never the unlike, and never yourself
         if (data.liked && Array.isArray(data.authorNames) && data.authorNames.includes(myPlayerName) && data.likerName !== myPlayerName) {
-            showToast(`${data.likerName} liked your word "${data.word}"!`);
+            showToast(`${data.likerName} liked ${data.word}`);
         }
     });
 
@@ -1945,6 +1964,14 @@ btnStandingsViewWords.addEventListener('click', () => {
     showOverlay(screenResults);
 });
 
+const btnWinnerViewWords = document.getElementById('btn-winner-view-words');
+if (btnWinnerViewWords) {
+    btnWinnerViewWords.addEventListener('click', () => {
+        hideOverlay(screenWinner);
+        showOverlay(screenResults);
+    });
+}
+
 btnCopyLink.addEventListener('click', () => {
     const inviteLink = `${window.location.origin}${window.location.pathname}?room=${myRoomCode}`;
     navigator.clipboard.writeText(inviteLink).then(() => {
@@ -2157,12 +2184,18 @@ function updateWordLikeUI(word, likerName, liked) {
     const heartBtn = li.querySelector('.heart-btn');
     if (!heartBtn) return; // the row's own author has no heart button to update
 
-    const count = wordLikes[word].size;
-    heartBtn.classList.toggle('liked', wordLikes[word].has(myPlayerName));
-    heartBtn.querySelector('.heart-icon').classList.toggle('filled', wordLikes[word].has(myPlayerName));
-    const countEl = heartBtn.querySelector('.heart-count');
-    countEl.textContent = count;
-    countEl.classList.toggle('hidden', count === 0); // declutter the zero-state
+    const likedByMe = wordLikes[word].has(myPlayerName);
+    heartBtn.classList.toggle('liked', likedByMe);
+    heartBtn.setAttribute('aria-pressed', likedByMe ? 'true' : 'false');
+    heartBtn.title = likedByMe ? 'Unlike this word' : 'Like this word';
+    heartBtn.setAttribute('aria-label', heartBtn.title);
+    const icon = heartBtn.querySelector('.heart-icon');
+    icon.classList.toggle('filled', likedByMe);
+    icon.classList.remove('pop');
+    if (likedByMe && !prefersReducedMotion()) {
+        void icon.offsetWidth;
+        icon.classList.add('pop');
+    }
 }
 
 function showToast(message) {
@@ -2453,6 +2486,37 @@ function renderWinnerScreen(players, roundsPlayed = maxRounds) {
     }
 }
 
+function playCountdownFlicker() {
+    const host = document.getElementById('countdown-flicker');
+    if (!host || prefersReducedMotion()) return;
+
+    const mount = (svg) => {
+        host.innerHTML = svg;
+    };
+
+    if (countdownFlickerMarkup) {
+        mount(countdownFlickerMarkup);
+        return;
+    }
+
+    fetch('flicker-countdown.svg')
+        .then((r) => (r.ok ? r.text() : Promise.reject()))
+        .then((svg) => {
+            countdownFlickerMarkup = svg;
+            if (screenCountdown.classList.contains('active')) mount(svg);
+        })
+        .catch(() => {});
+}
+
+function paintCountdownCount(count) {
+    if (!countdownTimer) return;
+    countdownTimer.textContent = String(count);
+    if (!prefersReducedMotion()) return;
+    countdownTimer.classList.remove('animate-pop');
+    void countdownTimer.offsetWidth;
+    countdownTimer.classList.add('animate-pop');
+}
+
 // --- COUNTDOWN SEQUENCE ---
 function startCountdown() {
     // Held at module scope so leaving the room can cancel a countdown in flight —
@@ -2462,20 +2526,14 @@ function startCountdown() {
     document.body.classList.add('counting-down');
     if (countdownRound) countdownRound.textContent = `ROUND ${currentRound} OF ${maxRounds}`;
     showOverlay(screenCountdown);
+    playCountdownFlicker();
     let count = 5;
-    countdownTimer.textContent = count;
-
-    countdownTimer.classList.remove('animate-pop');
-    void countdownTimer.offsetWidth;
-    countdownTimer.classList.add('animate-pop');
+    paintCountdownCount(count);
 
     countdownInterval = setInterval(() => {
         count--;
         if (count > 0) {
-            countdownTimer.textContent = count;
-            countdownTimer.classList.remove('animate-pop');
-            void countdownTimer.offsetWidth;
-            countdownTimer.classList.add('animate-pop');
+            paintCountdownCount(count);
         } else {
             clearInterval(countdownInterval);
             countdownInterval = null;
@@ -2586,7 +2644,7 @@ function showCoachStep(i) {
         wordInput.placeholder = `Try: ${step.hint}`;
         wordInput.focus();
     } else {
-        wordInput.placeholder = 'Type here...';
+        wordInput.placeholder = 'Spell something';
     }
 
     setCoachVisible(true);
@@ -2617,6 +2675,7 @@ function startTutorial() {
     timeLeft = 60;
     isPlaying = true; // lets the input and tiles respond; every network path checks isTutorial
 
+    fitGameLayout();
     navRoomDisplay.textContent = 'Room: DEMO';
     navRoundDisplay.textContent = 'Tutorial';
     roundIndicator.textContent = 'Tutorial';
@@ -2647,7 +2706,7 @@ function endTutorial() {
     tiles.forEach(t => { t.textContent = ''; t.onclick = null; });
     draftList.innerHTML = '';
     wordInput.value = '';
-    wordInput.placeholder = 'Type here...';
+    wordInput.placeholder = 'Spell something';
     wordInput.disabled = true;
     sendBtn.disabled = true;
 
@@ -2724,7 +2783,7 @@ function finishTutorialToDemo() {
 function tutorialWordAccepted() {
     const step = COACH_STEPS[coachStep];
     if (!step || !step.awaitWord) return;
-    wordInput.placeholder = 'Type here...';
+    wordInput.placeholder = 'Spell something';
     setTimeout(() => showCoachStep(coachStep + 1), 450); // let them see the word land
 }
 
@@ -2785,6 +2844,7 @@ function initRound(syncedTime = null) {
     isPlaying = true;
     saveGameStateToSession();
 
+    fitGameLayout();
     initPhysics();
 
     draftList.innerHTML = '';
@@ -3152,10 +3212,6 @@ wordInput.addEventListener('focus', () => {
 });
 
 if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', () => {
-        document.body.style.height = window.visualViewport.height + 'px';
-        window.scrollTo(0, 0);
-    });
     document.body.style.height = window.visualViewport.height + 'px';
 }
 
@@ -3270,8 +3326,8 @@ function initPhysics() {
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
-    canvas.style.width = width + 'px';
-    canvas.style.height = height + 'px';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const Engine = Matter.Engine,
@@ -3345,7 +3401,115 @@ if (gravityBox && typeof ResizeObserver !== 'undefined') {
     const gravityBoxObserver = new ResizeObserver(schedulePhysicsLayoutRefresh);
     gravityBoxObserver.observe(gravityBox);
 }
-window.addEventListener('resize', schedulePhysicsLayoutRefresh);
+
+function clampNum(n, min, max) {
+    return Math.max(min, Math.min(max, n));
+}
+
+function viewportSize() {
+    const vv = window.visualViewport;
+    return {
+        w: vv ? vv.width : window.innerWidth,
+        h: vv ? vv.height : window.innerHeight
+    };
+}
+
+function applyViewportHeight() {
+    if (window.visualViewport) {
+        document.body.style.height = window.visualViewport.height + 'px';
+        window.scrollTo(0, 0);
+    }
+}
+
+// Size the square board and gravity box from the live viewport so ultrawide,
+// squat laptop, and tall-phone layouts all use the space they actually have.
+function fitGameLayout() {
+    const { w: vw, h: vh } = viewportSize();
+    const root = document.documentElement;
+    const isMobile = vw <= 768;
+    const isLandscapePhone = isMobile && vh <= 650;
+
+    if (!isMobile) {
+        const navH = 48;
+        const pad = clampNum(vw * 0.04, 16, 48);
+        const padBottom = 88;
+        const gap = pad;
+        const availH = vh - navH - pad - padBottom;
+        const availW = vw - pad * 2;
+        const workspaceMin = 260;
+        const workspaceMax = 360;
+        const panelMax = 356;
+        const panelMin = 200;
+
+        let panel = Math.min(panelMax, availH, availW - gap - workspaceMin);
+        panel = clampNum(panel, panelMin, panelMax);
+        let workspace = clampNum(availW - gap - panel, workspaceMin, workspaceMax);
+
+        if (panel + gap + workspace > availW + 0.5) {
+            workspace = clampNum(availW - gap - panel, 220, workspaceMax);
+        }
+        if (panel > availH) {
+            panel = Math.max(180, availH);
+        }
+
+        root.style.setProperty('--game-panel-size', `${Math.round(panel)}px`);
+        root.style.setProperty('--game-workspace-width', `${Math.round(workspace)}px`);
+        root.style.setProperty('--game-chassis-gap', `${Math.round(gap)}px`);
+        root.style.setProperty('--game-chassis-pad', `${Math.round(pad)}px`);
+        root.style.setProperty('--game-chassis-pad-bottom', '88px');
+        document.body.classList.toggle('game-compact', panel < 280);
+        document.body.classList.remove('game-mobile-landscape');
+    } else if (isLandscapePhone) {
+        const navH = 36;
+        const barH = vh <= 480 ? 0 : 56;
+        const pad = 8;
+        const headerH = 36;
+        const inputH = 48;
+        const availH = Math.max(120, vh - navH - barH - pad * 2 - headerH - inputH);
+        const availW = vw - pad * 2;
+        const grid = clampNum(Math.min(availW * 0.48, availH, 240), 132, 240);
+
+        root.style.setProperty('--game-panel-size', `${Math.round(grid)}px`);
+        root.style.setProperty('--gravity-box-height', `${Math.round(availH)}px`);
+        document.body.classList.add('game-mobile-landscape');
+        document.body.classList.remove('game-compact');
+    } else {
+        const navH = 36;
+        const barH = vh <= 480 ? 0 : 56;
+        const chassisPadTop = 8;
+        const chassisPadBottom = barH ? 64 : 8;
+        const headerH = 40;
+        const inputH = 50;
+        const gaps = 16;
+        const innerH = vh - navH - chassisPadTop - chassisPadBottom;
+        const innerW = vw - 16;
+        const usable = innerH - headerH - inputH - gaps;
+        const minGravity = 72;
+        const grid = clampNum(Math.min(innerW, 320, Math.max(0, usable - minGravity)), 140, 320);
+        const gravity = Math.max(minGravity, usable - grid);
+
+        root.style.setProperty('--game-panel-size', `${Math.round(grid)}px`);
+        root.style.setProperty('--gravity-box-height', `${Math.round(gravity)}px`);
+        document.body.classList.remove('game-compact', 'game-mobile-landscape');
+    }
+
+    if (gravityBox) void gravityBox.offsetHeight;
+    schedulePhysicsLayoutRefresh();
+}
+
+function onViewportChange() {
+    applyViewportHeight();
+    fitGameLayout();
+}
+
+window.addEventListener('resize', onViewportChange);
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', onViewportChange);
+}
+window.addEventListener('orientationchange', () => {
+    setTimeout(onViewportChange, 80);
+});
+fitGameLayout();
 
 function drawPill(ctx, x, y, width, height, angle, text) {
     ctx.save();

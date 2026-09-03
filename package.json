@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "build:flicker": "node scripts/render-flicker.mjs"
   },
   "keywords": [],
   "author": "",
@@ -13,6 +14,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.105.1",
     "express": "^5.2.1",
+    "flicker-dot": "^0.1.4",
     "socket.io": "^4.8.3"
   }
 }

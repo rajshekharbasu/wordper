@@ -39,9 +39,10 @@
     <!-- OVERLAY 1: Boot Screen & Controls -->
     <div id="screen-boot" class="overlay-screen product-tile-parchment active">
         <h1 class="hero-display">WordPerfect</h1>
+        <p class="caption text-muted boot-tagline">The word nobody else found.</p>
 
         <div id="boot-loading" class="boot-loading">
-            <div class="boot-spinner" aria-hidden="true"></div>
+            <div id="boot-spinner-host" class="boot-spinner-host"></div>
             <p class="lead text-muted" id="boot-status">Loading dictionary...</p>
             <p class="caption text-muted boot-tip" id="boot-tip"></p>
         </div>
@@ -183,7 +184,8 @@
     <!-- OVERLAY 3: The 5-Second Countdown -->
     <div id="screen-countdown" class="overlay-screen product-tile-dark">
         <p class="caption-strong" id="countdown-round" style="opacity: 0.6; letter-spacing: 1.5px;">ROUND 1 OF 3</p>
-        <p class="hero-display" id="countdown-timer" style="font-size: 140px; font-variant-numeric: tabular-nums;">5</p>
+        <div id="countdown-flicker" class="countdown-flicker" aria-hidden="true"></div>
+        <p class="hero-display countdown-timer" id="countdown-timer" aria-live="assertive">5</p>
     </div>
 
     <!-- OVERLAY 4: Penalty Modal -->
@@ -215,8 +217,7 @@
             style="width: 100%; max-width: 500px; padding: 24px; margin: 32px 0; max-height: 50vh; overflow-y: auto;">
             <ul id="results-list" class="body"
                 style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 16px;"></ul>
-            <p class="caption text-muted hidden" id="results-empty-msg" style="text-align: center;">No words
-                submitted this round.</p>
+            <p class="caption text-muted hidden" id="results-empty-msg" style="text-align: center;">Nobody found a word.</p>
         </div>
         <button id="btn-next-round" class="button-store-hero">View Standings</button>
         <button id="btn-results-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to
@@ -239,13 +240,14 @@
 
     <!-- OVERLAY 6: Game Over / Winner Podium -->
     <div id="screen-winner" class="overlay-screen product-tile-dark" style="z-index: 160;">
-        <h1 class="hero-display" style="margin-bottom: 48px;">Game Over</h1>
+        <h1 class="hero-display" style="margin-bottom: 48px;">That's the board.</h1>
         <div id="winner-list"
             style="display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 400px; margin-bottom: 48px;">
             <!-- Podium injected here -->
         </div>
         <button id="btn-play-again" class="button-primary hidden" style="padding: 14px 48px; font-size: 18px;">Play
             Again</button>
+        <button id="btn-winner-view-words" type="button" class="body-strong button-view-words">View Words</button>
         <p id="guest-waiting-msg" class="body-muted hidden">Waiting for host to restart...</p>
         <button id="btn-winner-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to
             Home</button>
@@ -299,7 +301,7 @@
 
                 <form id="word-form" class="input-cluster">
                     <div class="input-wrapper">
-                        <input type="text" id="word-input" class="pill-input body" placeholder="Type here..."
+                        <input type="text" id="word-input" class="pill-input body" placeholder="Spell something"
                             autocomplete="off">
                         <button type="submit" id="send-word-btn" class="send-btn" disabled>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
