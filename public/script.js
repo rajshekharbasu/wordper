@@ -582,6 +582,7 @@ lobbyInputRounds.addEventListener('input', (e) => {
     if (!isHost) return;
     maxRounds = parseInt(e.target.value);
     lobbyRoundsDisplay.textContent = `${maxRounds} Round${maxRounds > 1 ? 's' : ''}`;
+    refreshLobbySettingsSummary();
     updateLobbyRoundText();
     if (isReady) {
         isReady = false;
@@ -598,6 +599,7 @@ lobbyInputTime.addEventListener('input', (e) => {
     if (!isHost) return;
     secondsPerRound = parseInt(e.target.value);
     lobbyTimeDisplay.textContent = `${secondsPerRound}s`;
+    refreshLobbySettingsSummary();
     if (isReady) {
         isReady = false;
         resetReadyButtons();
@@ -611,6 +613,17 @@ lobbyInputTime.addEventListener('change', async () => {
 
 // Reflects scoreMode onto the toggle buttons + hint caption. Called for local changes,
 // remote guest sync, and on (re)join — the one place that knows how to paint this state.
+
+function refreshLobbySettingsSummary() {
+    const roundsLabel = document.getElementById('lobby-step-rounds-label');
+    const timeLabel = document.getElementById('lobby-step-time-label');
+    const modeLabelEl = document.getElementById('lobby-step-mode-label');
+    const modeLabel = scoreMode === 'scrabble' ? 'Scrabble' : 'Classic';
+    if (roundsLabel) roundsLabel.textContent = `${maxRounds} round${maxRounds > 1 ? 's' : ''}`;
+    if (timeLabel) timeLabel.textContent = `${secondsPerRound}s`;
+    if (modeLabelEl) modeLabelEl.textContent = modeLabel;
+}
+
 function setModeToggleUI(mode) {
     modeToggleBtns.forEach(btn => {
         btn.classList.toggle('active', btn.dataset.mode === mode);
@@ -620,6 +633,7 @@ function setModeToggleUI(mode) {
             ? 'Rare letters score more (Scrabble values).'
             : '1 point per letter.';
     }
+    refreshLobbySettingsSummary();
 }
 
 if (lobbyModeToggle) {
@@ -636,6 +650,108 @@ if (lobbyModeToggle) {
         }
         await syncMyState();
     });
+}
+
+function bumpLobbyRange(inputEl, delta) {
+    if (!inputEl) return false;
+    const min = parseInt(inputEl.min, 10);
+    const max = parseInt(inputEl.max, 10);
+    const step = parseInt(inputEl.step, 10) || 1;
+    const cur = parseInt(inputEl.value, 10);
+    const next = Math.min(max, Math.max(min, cur + delta * step));
+    if (next === cur) return false;
+    inputEl.value = String(next);
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+}
+
+async function stepLobbyMode(dir) {
+    const modes = ['classic', 'scrabble'];
+    const idx = modes.indexOf(scoreMode);
+    const next = modes[(idx + (dir >= 0 ? 1 : -1) + modes.length) % modes.length];
+    if (next === scoreMode) return;
+    scoreMode = next;
+    setModeToggleUI(scoreMode);
+    if (isReady) {
+        isReady = false;
+        resetReadyButtons();
+    }
+    await syncMyState();
+}
+
+const lobbySteppers = document.getElementById('lobby-settings-summary');
+if (lobbySteppers && lobbySteppers.classList.contains('lobby-steppers')) {
+    async function applyLobbyStep(step, dir) {
+        if (!step || !dir) return;
+        if (!isHost) {
+            showToast('Only the host can change that');
+            return;
+        }
+        const kind = step.dataset.step;
+        if (kind === 'rounds') {
+            bumpLobbyRange(lobbyInputRounds, dir);
+        } else if (kind === 'time') {
+            bumpLobbyRange(lobbyInputTime, dir);
+        } else if (kind === 'mode') {
+            await stepLobbyMode(dir);
+        }
+    }
+
+    lobbySteppers.addEventListener('click', async (e) => {
+        const step = e.target.closest('.lobby-step');
+        if (!step || !lobbySteppers.contains(step)) return;
+        const btn = e.target.closest('.lobby-step-btn');
+        if (!btn) return;
+        const dir = parseInt(btn.dataset.dir, 10) || 0;
+        await applyLobbyStep(step, dir);
+    });
+
+    // Host-only: wheel on a chip steps its value. Guests keep page scroll.
+    let wheelLock = false;
+    lobbySteppers.addEventListener('wheel', (e) => {
+        const step = e.target.closest('.lobby-step');
+        if (!step || !lobbySteppers.contains(step)) return;
+        if (!isHost) return;
+        e.preventDefault();
+        if (wheelLock) return;
+        const dy = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        if (!dy) return;
+        wheelLock = true;
+        const dir = dy > 0 ? 1 : -1;
+        applyLobbyStep(step, dir);
+        setTimeout(() => { wheelLock = false; }, 80);
+    }, { passive: false });
+
+    // Host-only horizontal swipe. Vertical motion is left for lobby scroll.
+    let drag = null;
+    lobbySteppers.addEventListener('pointerdown', (e) => {
+        if (!isHost) return;
+        const step = e.target.closest('.lobby-step');
+        if (!step || !lobbySteppers.contains(step)) return;
+        if (e.target.closest('.lobby-step-btn')) return;
+        drag = { step, x: e.clientX, y: e.clientY, moved: false, pointerId: e.pointerId };
+        try { step.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    lobbySteppers.addEventListener('pointermove', (e) => {
+        if (!drag || e.pointerId !== drag.pointerId) return;
+        const dx = e.clientX - drag.x;
+        const dy = e.clientY - drag.y;
+        if (!drag.moved && Math.abs(dx) < 18) return;
+        if (Math.abs(dx) < Math.abs(dy)) return;
+        if (Math.abs(dx) < 18) return;
+        drag.moved = true;
+        const dir = dx > 0 ? 1 : -1;
+        drag.x = e.clientX;
+        drag.y = e.clientY;
+        applyLobbyStep(drag.step, dir);
+    });
+    const endDrag = (e) => {
+        if (!drag || (e && e.pointerId !== drag.pointerId)) return;
+        drag = null;
+    };
+    lobbySteppers.addEventListener('pointerup', endDrag);
+    lobbySteppers.addEventListener('pointercancel', endDrag);
 }
 
 
@@ -1016,12 +1132,14 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                     maxRounds = hostPlayer.maxRounds;
                     lobbyInputRounds.value = maxRounds;
                     lobbyRoundsDisplay.textContent = `${maxRounds} Round${maxRounds > 1 ? 's' : ''}`;
+                    refreshLobbySettingsSummary();
                     settingsChanged = true;
                 }
                 if (hostPlayer.roundTime !== undefined && hostPlayer.roundTime !== secondsPerRound) {
                     secondsPerRound = hostPlayer.roundTime;
                     lobbyInputTime.value = secondsPerRound;
                     lobbyTimeDisplay.textContent = `${secondsPerRound}s`;
+                    refreshLobbySettingsSummary();
                     settingsChanged = true;
                 }
                 if (hostPlayer.scoreMode !== undefined && hostPlayer.scoreMode !== scoreMode) {
@@ -1372,7 +1490,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                         <span class="caption result-authors">${authorsText}</span>
                     </div>
                     <div style="display:flex; align-items:center; gap:10px;">
-                        <span class="result-points">${pointsText}</span>${heartHtml}
+                        ${heartHtml}<span class="result-points">${pointsText}</span>
                         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; transition: transform 0.3s var(--ease-out); opacity: 0.5; flex-shrink: 0;">
                             <polyline points="6 9 12 15 18 9"></polyline>
                         </svg>
@@ -2034,8 +2152,10 @@ btnCreateRoom.addEventListener('click', async () => {
     // Pre-initialize lobby setting displays for the Host
     lobbyInputRounds.value = maxRounds;
     lobbyRoundsDisplay.textContent = `${maxRounds} Round${maxRounds > 1 ? 's' : ''}`;
+    refreshLobbySettingsSummary();
     lobbyInputTime.value = secondsPerRound;
     lobbyTimeDisplay.textContent = `${secondsPerRound}s`;
+    refreshLobbySettingsSummary();
     setModeToggleUI(scoreMode);
 
     clearGameStateFromSession();
@@ -2102,29 +2222,24 @@ btnCopyLink.addEventListener('click', () => {
         const wrapper = btnCopyLink.querySelector('.icon-wrapper');
         const copySvg = document.getElementById('copy-icon-svg');
         const checkSvg = document.getElementById('check-icon-svg');
-        const btnText = btnCopyLink.querySelector('span');
-        const originalText = btnText.textContent;
+        if (!wrapper || !copySvg || !checkSvg) return;
 
         // Phase 1: Start transition (fade out and blur)
         wrapper.classList.add('transitioning');
 
         setTimeout(() => {
-            // Swap icons and label text
+            // Swap icons only (icon-only button — no label text)
             copySvg.style.opacity = '0';
             checkSvg.style.opacity = '1';
-            btnText.textContent = 'Copied!';
-            
-            // Phase 2: Fade back in with unblur
             wrapper.classList.remove('transitioning');
         }, 150);
 
-        // Transition back to original state after delay
+        // Revert to copy icon after ~1.8s
         setTimeout(() => {
             wrapper.classList.add('transitioning');
             setTimeout(() => {
                 copySvg.style.opacity = '1';
                 checkSvg.style.opacity = '0';
-                btnText.textContent = originalText;
                 wrapper.classList.remove('transitioning');
             }, 150);
         }, 1800);
@@ -2388,7 +2503,7 @@ function renderLobbyPlayers(players) {
             </div>
 
             <div style="display: flex; align-items: center; gap: 12px;">
-                <span>${p.score} pts</span>
+                <span class="lobby-player-score">${p.score} pts</span>
                 <span style="display: flex; align-items: center; justify-content: flex-end; width: 30px;">${readyIndicator}</span>
             </div>
         `;
@@ -3838,6 +3953,8 @@ if (btnWinnerHome) btnWinnerHome.addEventListener('click', leaveRoomAndGoHome);
 if (btnResultsHome) btnResultsHome.addEventListener('click', confirmLeaveGame);
 if (btnStandingsHome) btnStandingsHome.addEventListener('click', confirmLeaveGame);
 if (navHomeBtn) navHomeBtn.addEventListener('click', confirmLeaveGame);
+
+refreshLobbySettingsSummary();
 
 // Bind Bot Toggle
 const btnToggleAi = document.getElementById('btn-toggle-ai');
