@@ -81,6 +81,10 @@ test('verifyHostEvent rejects stale generation during failover', () => {
     );
 });
 
+test('integrity API does not export presence-score seeding', () => {
+    assert.strictEqual(typeof integrity.seedScoreLedgerFromPlayers, 'undefined');
+});
+
 test('score ledger ignores forged presence bases', () => {
     const players = [
         { id: 'p1', name: 'Ada', score: 999, totalWords: 50 },

@@ -835,9 +835,10 @@ async function maybeElectNewHost() {
         isHost = true;
         lastKnownHostId = myPlayerId;
         bumpHostGeneration();
-        // One-time seed from roster; presence scores are not trusted on later rounds.
+        // Takeover starts at zero. Presence scores are forgeable; only a
+        // session restore (original host refresh) is a trusted ledger.
         if (!hostScoreLedger || Object.keys(hostScoreLedger).length === 0) {
-            hostScoreLedger = WordperfectIntegrity.seedScoreLedgerFromPlayers(activePlayersList);
+            hostScoreLedger = WordperfectIntegrity.createScoreLedger(activePlayersList);
         } else {
             hostScoreLedger = WordperfectIntegrity.ensureScoreLedger(hostScoreLedger, activePlayersList);
         }
@@ -1136,7 +1137,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             await roomChannel.send({
                 type: 'broadcast',
                 event: 'claim_denied',
-                payload: { requesterId: data.requesterId }
+                payload: hostPayload({ requesterId: data.requesterId })
             });
             return;
         }
@@ -1144,7 +1145,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         await roomChannel.send({
             type: 'broadcast',
             event: 'claim_granted',
-            payload: { requesterId: data.requesterId, seat, isPlaying }
+            payload: hostPayload({ requesterId: data.requesterId, seat, isPlaying })
         });
         disconnectedSeats = disconnectedSeats.filter(item => item.id !== seat.id);
         lastKnownDisconnectedSeats = disconnectedSeats.map(item => ({ ...item }));
@@ -1154,6 +1155,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
     roomChannel.on('broadcast', { event: 'claim_granted' }, async (response) => {
         const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) {
+            console.warn('Ignoring claim_granted from non-host');
+            return;
+        }
         if (data.requesterId !== myPlayerId || !data.seat) return;
 
         reclaimRequestPending = false;
@@ -1166,6 +1171,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
     roomChannel.on('broadcast', { event: 'claim_denied' }, (response) => {
         const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) {
+            console.warn('Ignoring claim_denied from non-host');
+            return;
+        }
         if (data.requesterId !== myPlayerId) return;
         reclaimRequestPending = false;
         failJoin('That reconnect seat is no longer available. Ask the host to start a new game.');

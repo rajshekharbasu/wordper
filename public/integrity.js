@@ -83,19 +83,6 @@
         return ledger;
     }
 
-    /** One-time seed after host failover (presence scores are not trusted thereafter). */
-    function seedScoreLedgerFromPlayers(players) {
-        const ledger = Object.create(null);
-        (players || []).forEach(function (p) {
-            if (!p || p.id == null) return;
-            ledger[p.id] = {
-                score: Number(p.score) || 0,
-                totalWords: Number(p.totalWords) || 0
-            };
-        });
-        return ledger;
-    }
-
     function ensureScoreLedger(ledger, players) {
         const next = ledger && typeof ledger === 'object' ? ledger : Object.create(null);
         (players || []).forEach(function (p) {
@@ -161,7 +148,6 @@
         getElectedHostId: getElectedHostId,
         verifyHostEvent: verifyHostEvent,
         createScoreLedger: createScoreLedger,
-        seedScoreLedgerFromPlayers: seedScoreLedgerFromPlayers,
         ensureScoreLedger: ensureScoreLedger,
         applyUniqueWordToLedger: applyUniqueWordToLedger,
         overlayLedgerScores: overlayLedgerScores,
