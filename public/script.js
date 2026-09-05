@@ -61,6 +61,9 @@ let finalizeWatchdog = null;
 let activePlayersList = []; // Kept in sync via presence
 let hostElectionInProgress = false;
 let lastKnownHostId = null;
+let hostGeneration = 0; // bumps on host election; soft auth for host-gated broadcasts
+let expectedHostGeneration = null; // guests mirror live host presence hostGeneration
+let hostScoreLedger = Object.create(null); // host-authoritative scores; never trust presence.score
 let lastKnownAiPlayers = []; // survives host leave so a new host can adopt the bots
 let reconcilingBots = false;
 let cachedBoardWords = null;
@@ -101,28 +104,55 @@ function getBroadcastData(response) {
 }
 
 function getHostPlayerId() {
-    const host = activePlayersList.find(p => p.isHost && !p.isAi);
-    return host ? host.id : null;
+    return WordperfectIntegrity.getLiveHostId(activePlayersList);
 }
 
 function getElectedHostId() {
-    const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
-    if (realPlayers.length === 0) return null;
-    return [...realPlayers]
-        .map(p => p.id)
-        .sort((a, b) => String(a).localeCompare(String(b)))[0];
+    return WordperfectIntegrity.getElectedHostId(activePlayersList);
 }
 
-// Soft auth: ignore game-control broadcasts that aren't from the current host.
-// Presence ids are visible to the room, so this blocks casual spoofing, not a determined attacker.
+function hostPayload(extra) {
+    return Object.assign({ senderId: myPlayerId, hostGeneration }, extra || {});
+}
+
+// Soft auth: ignore game-control broadcasts that aren't from the current live host.
+// Residual: public broadcast cannot authenticate; hostGeneration + live presence only
+// stop casual senderId spoofing. Need private channels + auth for determined attackers.
 function isFromCurrentHost(data) {
-    if (!data || data.senderId == null) return false;
-    const liveHostId = getHostPlayerId();
-    if (liveHostId) return data.senderId === liveHostId;
-    if (lastKnownHostId && data.senderId === lastKnownHostId) return true;
-    // Failover window: no live host yet — accept only the deterministic election winner
-    const electedId = getElectedHostId();
-    return !!electedId && data.senderId === electedId;
+    return WordperfectIntegrity.verifyHostEvent(data, {
+        livePlayers: activePlayersList,
+        electedHostId: getElectedHostId(),
+        expectedHostGeneration
+    });
+}
+
+function bumpHostGeneration() {
+    const base = Math.max(
+        Number(hostGeneration) || 0,
+        Number(expectedHostGeneration) || 0
+    );
+    hostGeneration = base + 1;
+    expectedHostGeneration = hostGeneration;
+    sessionStorage.setItem('wordperfect_host_generation', String(hostGeneration));
+}
+
+function persistHostScoreLedger() {
+    if (!isHost) return;
+    try {
+        sessionStorage.setItem('wordperfect_host_score_ledger', JSON.stringify(hostScoreLedger));
+        sessionStorage.setItem('wordperfect_host_generation', String(hostGeneration));
+    } catch (e) { /* ignore quota */ }
+}
+
+function restoreHostScoreLedger() {
+    try {
+        const raw = sessionStorage.getItem('wordperfect_host_score_ledger');
+        if (raw) hostScoreLedger = JSON.parse(raw) || Object.create(null);
+    } catch (e) {
+        hostScoreLedger = Object.create(null);
+    }
+    const gen = sessionStorage.getItem('wordperfect_host_generation');
+    if (gen != null && gen !== '') hostGeneration = Number(gen) || hostGeneration;
 }
 
 // Host re-validates every submitted word so a modified client can't score junk
@@ -179,6 +209,7 @@ function saveGameStateToSession() {
     if (isHost) {
         sessionStorage.setItem('wordperfect_bots', JSON.stringify(myLocalAiPlayers));
         sessionStorage.setItem('wordperfect_ai_enabled', aiEnabled ? 'true' : 'false');
+        persistHostScoreLedger();
     }
 }
 
@@ -198,6 +229,8 @@ function clearGameStateFromSession() {
     sessionStorage.removeItem('wordperfect_word_errors');
     sessionStorage.removeItem('wordperfect_bots');
     sessionStorage.removeItem('wordperfect_ai_enabled');
+    sessionStorage.removeItem('wordperfect_host_score_ledger');
+    sessionStorage.removeItem('wordperfect_host_generation');
 
     // Clear draft words for all rounds
     for (let i = 0; i < sessionStorage.length; i++) {
@@ -732,6 +765,26 @@ function setReconnectBusy(busy, message = '') {
     connectionRetryStatus.classList.toggle('is-error', !busy && !!message);
 }
 
+// Phoenix/Supabase fires CHANNEL_ERROR on every socket blip and auto-rejoins.
+// Hold the overlay until that recovery actually fails.
+const connectionRecovery = WordperfectConnectionRecovery.create({
+    isHidden: () => document.hidden,
+    onLost() {
+        showConnectionError(
+            reconnectInProgress
+                ? 'Rejoin failed. Check your connection and try again.'
+                : undefined
+        );
+    },
+    onRecovered() {
+        hideOverlay(connectionErrorModal);
+    }
+});
+
+document.addEventListener('visibilitychange', () => {
+    connectionRecovery.handleVisibility();
+});
+
 
 async function syncMyState() {
     if (!roomChannel) return;
@@ -758,6 +811,7 @@ async function syncMyState() {
         trackPayload.scoreMode = scoreMode;
         trackPayload.aiPlayers = myLocalAiPlayers;
         trackPayload.disconnectedSeats = disconnectedSeats;
+        trackPayload.hostGeneration = hostGeneration;
     }
 
     await roomChannel.track(trackPayload);
@@ -780,6 +834,15 @@ async function maybeElectNewHost() {
         console.log('Host left — taking over as host');
         isHost = true;
         lastKnownHostId = myPlayerId;
+        bumpHostGeneration();
+        // Takeover starts at zero. Presence scores are forgeable; only a
+        // session restore (original host refresh) is a trusted ledger.
+        if (!hostScoreLedger || Object.keys(hostScoreLedger).length === 0) {
+            hostScoreLedger = WordperfectIntegrity.createScoreLedger(activePlayersList);
+        } else {
+            hostScoreLedger = WordperfectIntegrity.ensureScoreLedger(hostScoreLedger, activePlayersList);
+        }
+        persistHostScoreLedger();
         sessionStorage.setItem('wordperfect_is_host', 'true');
 
         disconnectedSeats = lastKnownDisconnectedSeats.map(seat => ({ ...seat }));
@@ -807,10 +870,13 @@ async function maybeElectNewHost() {
         await syncMyState();
 
         // Recover submissions lost when the previous host dropped or refreshed
+        // Fresh bag so first-write-wins still accepts client resubmits after takeover
+        hostSubmissions = {};
+        roundFinalized = false;
         await roomChannel.send({
             type: 'broadcast',
             event: 'request_resubmit',
-            payload: { senderId: myPlayerId }
+            payload: hostPayload()
         });
 
         clearTimeout(finalizeWatchdog);
@@ -830,6 +896,15 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     myPlayerName = name;
     isHost = hostFlag;
     recoveringAsFormerHost = hostFlag && isRecovery;
+    if (hostFlag) {
+        if (isRecovery) {
+            restoreHostScoreLedger();
+            if (!hostGeneration) bumpHostGeneration();
+        } else {
+            hostScoreLedger = Object.create(null);
+            bumpHostGeneration();
+        }
+    }
     if (!hostFlag && !isPlaying && !reclaimingSeat) awaitingHostConfirm = true;
 
     // Persist session details across page refreshes
@@ -925,7 +1000,12 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             lastKnownAiPlayers = aiPlayersToAppend.map(b => ({ ...b }));
         }
 
-        if (liveHost) lastKnownHostId = liveHost.id;
+        if (liveHost) {
+            lastKnownHostId = liveHost.id;
+            if (liveHost.hostGeneration != null) {
+                expectedHostGeneration = Number(liveHost.hostGeneration);
+            }
+        }
 
         // Guest synchronizes with the host's settings (maxRounds, secondsPerRound) in real-time
         const hostPlayer = liveHost;
@@ -1057,7 +1137,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             await roomChannel.send({
                 type: 'broadcast',
                 event: 'claim_denied',
-                payload: { requesterId: data.requesterId }
+                payload: hostPayload({ requesterId: data.requesterId })
             });
             return;
         }
@@ -1065,7 +1145,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         await roomChannel.send({
             type: 'broadcast',
             event: 'claim_granted',
-            payload: { requesterId: data.requesterId, seat, isPlaying }
+            payload: hostPayload({ requesterId: data.requesterId, seat, isPlaying })
         });
         disconnectedSeats = disconnectedSeats.filter(item => item.id !== seat.id);
         lastKnownDisconnectedSeats = disconnectedSeats.map(item => ({ ...item }));
@@ -1075,6 +1155,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
     roomChannel.on('broadcast', { event: 'claim_granted' }, async (response) => {
         const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) {
+            console.warn('Ignoring claim_granted from non-host');
+            return;
+        }
         if (data.requesterId !== myPlayerId || !data.seat) return;
 
         reclaimRequestPending = false;
@@ -1087,6 +1171,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
     roomChannel.on('broadcast', { event: 'claim_denied' }, (response) => {
         const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) {
+            console.warn('Ignoring claim_denied from non-host');
+            return;
+        }
         if (data.requesterId !== myPlayerId) return;
         reclaimRequestPending = false;
         failJoin('That reconnect seat is no longer available. Ask the host to start a new game.');
@@ -1135,15 +1223,14 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             await roomChannel.send({
                 type: 'broadcast',
                 event: 'sync_game_state',
-                payload: {
-                    senderId: myPlayerId,
+                payload: hostPayload({
                     board: boardLetters,
                     currentRound: currentRound,
                     maxRounds: maxRounds,
                     roundTime: secondsPerRound,
                     scoreMode: scoreMode,
                     timeLeft: timeLeft
-                }
+                })
             });
         }
     });
@@ -1211,6 +1298,17 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         if (!isHost) return;
         const data = getBroadcastData(response);
         if (!data.playerId) return;
+        // Disconnected seats are host-filled from drafts — ignore spoofed broadcast ids
+        const existingSubmissionIds = new Set(Object.keys(hostSubmissions));
+        if (!WordperfectIntegrity.canAcceptWordSubmission(data.playerId, {
+            livePlayers: activePlayersList,
+            disconnectedSeatIds: [],
+            existingSubmissionIds,
+            firstWriteWins: true
+        })) {
+            console.warn('Ignoring submit_words for unknown/disconnected/duplicate playerId');
+            return;
+        }
         hostSubmissions[data.playerId] = sanitizeSubmittedWords(data.words);
         maybeFinalizeRound();
     });
@@ -1354,6 +1452,12 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         // Clear cached game states
         clearGameStateFromSession();
 
+        // Re-seed after clearGameStateFromSession wipes the session ledger keys
+        hostScoreLedger = WordperfectIntegrity.createScoreLedger(
+            [...activePlayersList, ...myLocalAiPlayers]
+        );
+        if (isHost) persistHostScoreLedger();
+
         await syncMyState();
 
         hideOverlay(screenWinner);
@@ -1374,6 +1478,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     // 3. Subscribe
     roomChannel.subscribe(async (status) => {
         if (channel !== roomChannel) return;
+        connectionRecovery.handleStatus(status, {
+            intentionalClose: intentionallyClosedChannels.has(channel),
+            allowBeforeJoin: reconnectInProgress || isPlaying
+        });
         if (status === 'SUBSCRIBED') {
             connectionLost = false;
             reconnectInProgress = false;
@@ -1406,8 +1514,9 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 // from session is proof enough. Probing here would risk kicking a player out
                 // of a live round just because presence was slow.
                 revealRoom();
-            } else {
-                // Stay on the boot screen until the host's presence proves this room is real
+            } else if (screenBoot.classList.contains('active') && !screenLobby.classList.contains('active')) {
+                // Stay on the boot screen until the host's presence proves this room is real.
+                // Skip this on an automatic rejoin — the guest is already in the lobby.
                 awaitingHostConfirm = true;
                 setJoinBusy(true);
                 showJoinStatus('Looking for that room...', false);
@@ -1432,18 +1541,13 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 await roomChannel.send({
                     type: 'broadcast',
                     event: 'request_resubmit',
-                    payload: { senderId: myPlayerId }
+                    payload: hostPayload()
                 });
             }
-        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-            console.error("Supabase Realtime Subscription Error:", status);
-            showConnectionError(
-                reconnectInProgress
-                    ? 'Rejoin failed. Check your connection and try again.'
-                    : undefined
-            );
-        } else if (status === 'CLOSED' && !intentionallyClosedChannels.has(channel)) {
-            showConnectionError();
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+            if (!intentionallyClosedChannels.has(channel)) {
+                console.warn('Realtime channel interrupted:', status);
+            }
         }
     });
 }
@@ -1456,6 +1560,9 @@ async function startGameAsHost() {
     dropDisconnectedSeatsForNextRound();
     cachedBoardWords = null;
     cachedBoardKey = '';
+    // Host-owned score ledger — never read presence.score when finalizing
+    hostScoreLedger = WordperfectIntegrity.createScoreLedger(activePlayersList);
+    persistHostScoreLedger();
     const newBoard = [];
     for (let i = 0; i < 16; i++) {
         newBoard.push(letterBag[Math.floor(Math.random() * letterBag.length)]);
@@ -1468,7 +1575,12 @@ async function startGameAsHost() {
     await roomChannel.send({
         type: 'broadcast',
         event: 'trigger_game',
-        payload: { senderId: myPlayerId, board: newBoard, maxRounds: maxRounds, roundTime: secondsPerRound, scoreMode: scoreMode }
+        payload: hostPayload({
+            board: newBoard,
+            maxRounds: maxRounds,
+            roundTime: secondsPerRound,
+            scoreMode: scoreMode
+        })
     });
 }
 
@@ -1639,6 +1751,10 @@ async function calculateScoresAndBroadcast() {
         }
     });
 
+    // Authority: hostScoreLedger, not presence.score (clients can forge presence)
+    hostScoreLedger = WordperfectIntegrity.ensureScoreLedger(hostScoreLedger, tempPlayers);
+    tempPlayers = WordperfectIntegrity.overlayLedgerScores(tempPlayers, hostScoreLedger);
+
     // Map words to authors
     for (let playerId in hostSubmissions) {
         let words = hostSubmissions[playerId];
@@ -1665,8 +1781,11 @@ async function calculateScoresAndBroadcast() {
         if (!isDuplicate) {
             let playerRef = tempPlayers.find(p => p.name === authors[0]);
             if (playerRef) {
-                playerRef.score += points;
-                playerRef.totalWords = (playerRef.totalWords || 0) + 1;
+                const entry = WordperfectIntegrity.applyUniqueWordToLedger(
+                    hostScoreLedger, playerRef.id, points
+                );
+                playerRef.score = entry.score;
+                playerRef.totalWords = entry.totalWords;
             }
         }
     }
@@ -1694,19 +1813,19 @@ async function calculateScoresAndBroadcast() {
     });
     lastKnownDisconnectedSeats = disconnectedSeats.map(seat => ({ ...seat }));
     lastKnownAiPlayers = myLocalAiPlayers.map(b => ({ ...b }));
+    persistHostScoreLedger();
     saveGameStateToSession();
     if (isHost) await syncMyState();
 
     await roomChannel.send({
         type: 'broadcast',
         event: 'round_results',
-        payload: {
-            senderId: myPlayerId,
+        payload: hostPayload({
             results,
             players: tempPlayers,
             isGameOver: isGameOver,
             currentRound: currentRound
-        }
+        })
     });
 }
 
@@ -1794,6 +1913,7 @@ async function leaveRoomAndGoHome() {
     physicsLayoutSize = '';
     awaitingHostConfirm = false;
     setJoinBusy(false);
+    connectionRecovery.reset();
     document.body.classList.remove('counting-down', 'penalized');
 
     if (roomChannel) {
@@ -1845,6 +1965,10 @@ async function leaveRoomAndGoHome() {
     aiEnabled = true;
     isReady = false;
     isHost = false;
+    hostGeneration = 0;
+    expectedHostGeneration = null;
+    hostScoreLedger = Object.create(null);
+    hostSubmissions = {};
     cachedBoardWords = null;
     cachedBoardKey = '';
 
@@ -2013,7 +2137,7 @@ btnCopyLink.addEventListener('click', () => {
 
 btnPlayAgain.addEventListener('click', async () => {
     if (isHost) {
-        await roomChannel.send({ type: 'broadcast', event: 'game_reset', payload: { senderId: myPlayerId } });
+        await roomChannel.send({ type: 'broadcast', event: 'game_reset', payload: hostPayload() });
     }
 });
 

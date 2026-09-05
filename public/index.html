@@ -9,7 +9,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
-    <script defer src="https://cdn.vercel-insights.com/v1/script.js"></script>
+    <script>
+        window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+    </script>
+    <script defer src="/_vercel/insights/script.js"></script>
 
 </head>
 
@@ -359,7 +362,7 @@
                 </svg>
             </div>
             <p class="caption-strong connection-eyebrow">CONNECTION LOST</p>
-            <h2 id="connection-error-title" class="display-md dialog-title">You’re still in the game.</h2>
+            <h2 id="connection-error-title" class="display-md dialog-title">You're still in the game.</h2>
             <p id="connection-error-body" class="body dialog-body">
                 Rejoin within 3 minutes to reclaim your seat, score, and current-round words.
             </p>
@@ -408,6 +411,8 @@
     <!-- SUPABASE CLIENT LIBRARY -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <script src="connection-recovery.js"></script>
+    <script src="integrity.js"></script>
     <script src="script.js"></script>
 </body>
 
