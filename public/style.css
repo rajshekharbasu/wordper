@@ -2630,9 +2630,9 @@ body.viewport-locked {
   position: absolute;
   right: 0;
   bottom: 0.1em;
-  width: 36px !important;
-  min-width: 36px;
-  height: 36px;
+  width: 40px !important;
+  min-width: 40px;
+  height: 40px;
   border-radius: 999px;
   padding: 0 !important;
   font-size: 13px;
@@ -2678,7 +2678,7 @@ body.viewport-locked {
   font-weight: 600;
   line-height: 1;
   user-select: none;
-  touch-action: none;
+  touch-action: pan-y;
   cursor: ew-resize;
 }
 
@@ -2688,6 +2688,7 @@ body.viewport-locked {
   color: var(--ink);
   white-space: nowrap;
   pointer-events: none;
+  font-variant-numeric: tabular-nums;
 }
 
 .lobby-step-btn {
@@ -2695,6 +2696,7 @@ body.viewport-locked {
   border: none;
   background: transparent;
   color: var(--body-muted);
+  position: relative;
   width: 22px;
   height: 22px;
   border-radius: 999px;
@@ -2706,6 +2708,12 @@ body.viewport-locked {
   font-size: 10px;
   line-height: 1;
   transition: transform 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.lobby-step-btn::after {
+  content: "";
+  position: absolute;
+  inset: -9px;
 }
 
 .lobby-step-btn:hover {

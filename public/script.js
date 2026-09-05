@@ -707,11 +707,12 @@ if (lobbySteppers && lobbySteppers.classList.contains('lobby-steppers')) {
         await applyLobbyStep(step, dir);
     });
 
-    // Wheel / trackpad scroll on a chip nudges its value (arrows still work)
+    // Host-only: wheel on a chip steps its value. Guests keep page scroll.
     let wheelLock = false;
     lobbySteppers.addEventListener('wheel', (e) => {
         const step = e.target.closest('.lobby-step');
         if (!step || !lobbySteppers.contains(step)) return;
+        if (!isHost) return;
         e.preventDefault();
         if (wheelLock) return;
         const dy = e.deltaY !== 0 ? e.deltaY : e.deltaX;
@@ -722,9 +723,10 @@ if (lobbySteppers && lobbySteppers.classList.contains('lobby-steppers')) {
         setTimeout(() => { wheelLock = false; }, 80);
     }, { passive: false });
 
-    // Horizontal drag / swipe on the value (or whole chip)
+    // Host-only horizontal swipe. Vertical motion is left for lobby scroll.
     let drag = null;
     lobbySteppers.addEventListener('pointerdown', (e) => {
+        if (!isHost) return;
         const step = e.target.closest('.lobby-step');
         if (!step || !lobbySteppers.contains(step)) return;
         if (e.target.closest('.lobby-step-btn')) return;
@@ -735,12 +737,11 @@ if (lobbySteppers && lobbySteppers.classList.contains('lobby-steppers')) {
         if (!drag || e.pointerId !== drag.pointerId) return;
         const dx = e.clientX - drag.x;
         const dy = e.clientY - drag.y;
-        if (!drag.moved && Math.abs(dx) < 18 && Math.abs(dy) < 18) return;
-        // Prefer horizontal swipe; vertical also counts so trackpad feel works
-        const primary = Math.abs(dx) >= Math.abs(dy) ? dx : -dy;
-        if (Math.abs(primary) < 18) return;
+        if (!drag.moved && Math.abs(dx) < 18) return;
+        if (Math.abs(dx) < Math.abs(dy)) return;
+        if (Math.abs(dx) < 18) return;
         drag.moved = true;
-        const dir = primary > 0 ? 1 : -1;
+        const dir = dx > 0 ? 1 : -1;
         drag.x = e.clientX;
         drag.y = e.clientY;
         applyLobbyStep(drag.step, dir);
