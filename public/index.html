@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>WordPerfect</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=lobby-step-2">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
@@ -96,69 +96,67 @@
     </div>
 
     <!-- OVERLAY 2: Lobby Screen -->
-    <div id="screen-lobby" class="overlay-screen product-tile-parchment">
-        <p class="caption-strong text-muted">ROOM CODE</p>
-        <h1 class="hero-display" id="display-room-code" style="letter-spacing: 4px; margin-bottom: 8px;">----</h1>
-        <button id="btn-copy-link" class="button-secondary" type="button"
-            style="width: auto; border-radius: 999px; padding: 8px 16px; font-size: 13px; margin-bottom: 24px; display: flex; align-items: center; gap: 8px;"
-            title="Copy invite link">
-            <div class="icon-wrapper"
-                style="position: relative; width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; will-change: filter, opacity; transition: filter 150ms ease-out, opacity 150ms ease-out;">
-                <svg id="copy-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                    stroke-linecap="round" stroke-linejoin="round"
-                    style="width: 14px; height: 14px; position: absolute; left: 0; top: 0; opacity: 1; transition: opacity 150ms ease-out;">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                </svg>
-                <svg id="check-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                    stroke-linecap="round" stroke-linejoin="round"
-                    style="width: 14px; height: 14px; position: absolute; left: 0; top: 0; opacity: 0; transition: opacity 150ms ease-out;">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
+    <div id="screen-lobby" class="overlay-screen product-tile-parchment lobby-screen">
+        <div class="lobby-stack">
+        <div class="lobby-code-row">
+            <div class="lobby-code-block">
+                <p class="caption-strong text-muted">ROOM</p>
+                <h1 class="lobby-code" id="display-room-code">----</h1>
             </div>
-            <span>Copy Invite Link</span>
-        </button>
-
-        <p class="body-strong" id="lobby-round-text" style="margin-bottom: 24px;">Round 1 of X</p>
-
-        <!-- Lobby Settings Card -->
-        <div class="utility-card" id="lobby-settings-card"
-            style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 24px; display: flex; flex-direction: column; gap: 24px;">
-            <p class="caption-strong text-muted" style="text-align: center; margin-bottom: 0px;">GAME SETTINGS</p>
-
-            <!-- Rounds Customiser -->
-            <div style="display: flex; flex-direction: column; gap: 12px;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span class="body-strong">Rounds</span>
-                    <span id="lobby-rounds-display" class="caption-strong text-muted">3 Rounds</span>
+            <button id="btn-copy-link" class="button-secondary lobby-copy-btn" type="button" title="Copy invite link" aria-label="Copy invite link">
+                <div class="icon-wrapper"
+                    style="position: relative; width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; will-change: filter, opacity; transition: filter 150ms ease-out, opacity 150ms ease-out;">
+                    <svg id="copy-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round"
+                        style="width: 14px; height: 14px; position: absolute; left: 0; top: 0; opacity: 1; transition: opacity 150ms ease-out;">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <svg id="check-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round"
+                        style="width: 14px; height: 14px; position: absolute; left: 0; top: 0; opacity: 0; transition: opacity 150ms ease-out;">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
                 </div>
-                <input type="range" id="lobby-input-rounds" class="slider" min="1" max="10" value="3">
+            </button>
+        </div>
+
+        <p class="caption text-muted lobby-meta" id="lobby-round-text">Round 1 of X</p>
+
+        <div class="lobby-steppers" id="lobby-settings-summary" role="group" aria-label="Lobby settings">
+            <div class="lobby-step" data-step="rounds">
+                <button type="button" class="lobby-step-btn" data-dir="-1" aria-label="Fewer rounds">◀</button>
+                <span class="lobby-step-value" id="lobby-step-rounds-label">3 rounds</span>
+                <button type="button" class="lobby-step-btn" data-dir="1" aria-label="More rounds">▶</button>
             </div>
-
-            <!-- Seconds Customiser -->
-            <div style="display: flex; flex-direction: column; gap: 12px;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span class="body-strong">Time per Round</span>
-                    <span id="lobby-time-display" class="caption-strong text-muted">60s</span>
-                </div>
-                <input type="range" id="lobby-input-time" class="slider" min="15" max="180" step="5" value="60">
+            <div class="lobby-step" data-step="time">
+                <button type="button" class="lobby-step-btn" data-dir="-1" aria-label="Less time">◀</button>
+                <span class="lobby-step-value" id="lobby-step-time-label">60s</span>
+                <button type="button" class="lobby-step-btn" data-dir="1" aria-label="More time">▶</button>
             </div>
-
-            <!-- Game Mode Customiser -->
-            <div style="display: flex; flex-direction: column; gap: 12px;">
-                <span class="body-strong">Game Mode</span>
-                <div class="mode-toggle" id="lobby-mode-toggle" role="group" aria-label="Scoring mode">
-                    <button type="button" class="mode-toggle-btn active" data-mode="classic">Classic</button>
-                    <button type="button" class="mode-toggle-btn" data-mode="scrabble">Scrabble</button>
-                </div>
-                <p class="caption text-muted" id="mode-toggle-hint">1 point per letter.</p>
+            <div class="lobby-step" data-step="mode">
+                <button type="button" class="lobby-step-btn" data-dir="-1" aria-label="Previous mode">◀</button>
+                <span class="lobby-step-value" id="lobby-step-mode-label">Classic</span>
+                <button type="button" class="lobby-step-btn" data-dir="1" aria-label="Next mode">▶</button>
             </div>
         </div>
 
-        <div class="utility-card" style="width: 100%; max-width: 400px; padding: 24px; margin-bottom: 24px;">
-            <p class="caption-strong text-muted" style="margin-bottom: 16px; text-align: center;">PLAYERS</p>
-            <ul id="lobby-player-list" class="body"
-                style="list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px;"></ul>
+        <!-- Hidden legacy controls: keep IDs/listeners; steppers drive these -->
+        <div class="lobby-settings-hidden" hidden aria-hidden="true">
+            <span id="lobby-rounds-display">3 Rounds</span>
+            <input type="range" id="lobby-input-rounds" class="slider" min="1" max="10" value="3">
+            <span id="lobby-time-display">60s</span>
+            <input type="range" id="lobby-input-time" class="slider" min="15" max="180" step="5" value="60">
+            <div class="mode-toggle" id="lobby-mode-toggle" role="group" aria-label="Scoring mode">
+                <button type="button" class="mode-toggle-btn active" data-mode="classic">Classic</button>
+                <button type="button" class="mode-toggle-btn" data-mode="scrabble">Scrabble</button>
+            </div>
+            <p id="mode-toggle-hint">1 point per letter.</p>
+        </div>
+
+        <div class="utility-card lobby-players-card">
+            <p class="caption-strong text-muted lobby-players-label">PLAYERS</p>
+            <ul id="lobby-player-list" class="body lobby-player-list"></ul>
         </div>
 
         <!-- AI Bot suggestion toast -->
@@ -180,12 +178,13 @@
             </button>
         </div>
 
-        <button id="btn-ready-up" class="button-primary" style="padding: 14px 48px; font-size: 18px;">Ready to
-            Play</button>
-        <button id="btn-lobby-home" class="button-secondary-text" type="button" style="margin-top: 12px;">Back to
-            Home</button>
+        <button id="btn-ready-up" class="button-primary lobby-ready-btn">Ready to Play</button>
+        <button id="btn-lobby-home" class="button-secondary-text" type="button">Back to Home</button>
+    
+        </div>
     </div>
-    <!-- OVERLAY 3: The 5-Second Countdown -->
+
+<!-- OVERLAY 3: The 5-Second Countdown -->
     <div id="screen-countdown" class="overlay-screen product-tile-dark">
         <p class="caption-strong" id="countdown-round" style="opacity: 0.6; letter-spacing: 1.5px;">ROUND 1 OF 3</p>
         <div id="countdown-flicker" class="countdown-flicker" aria-hidden="true"></div>
