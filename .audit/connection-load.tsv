@@ -1,0 +1,8 @@
+﻿ts	phase	decision	why	evidence	result
+2026-10-03T07:50:00Z	frame	scoped the pass to boot load and live connection, not a rewrite of script.js	the page that ships is public/, and the player feels boot wait and dropped rooms	public/index.html, public/script.js	open
+2026-10-03T07:51:00Z	baseline	counted the blocking scripts by downloading them	needed a number before moving anything	node fetch	supabase-js 218237 bytes, matter.min.js 80807 bytes, tests 29 passed
+2026-10-03T07:53:00Z	boot	removed matter from the boot document and deferred the remaining scripts	the lobby never constructs a physics engine	tests/boot-budget.test.js, localhost:4173	VERIFIED matter undefined on boot, canvas width 358 after initPhysics
+2026-10-03T07:55:00Z	dictionary	measured the word list GitHub serves on every boot	the join form stays hidden until that fetch finishes	bootEngine in public/script.js	1918178 bytes, 173122 lines, gzip 458809, cache-control max-age=300
+2026-10-03T07:57:00Z	dictionary	stored the word list in the Cache API	five-minute GitHub caching made repeat visits download it again	localhost:4173/?cache=2	VERIFIED second load had 173122 words and no unsorted.txt request
+2026-10-03T08:02:00Z	boot	removed the Google Fonts request and the zoom lock	the type stack already falls through to system-ui, and pinch zoom was blocked	public/index.html, public/style.css	VERIFIED no fonts.g or matter request, 173122 words, viewport allows zoom
+2026-10-03T08:15:00Z	connection	locked six reconnect decisions in round-sync.js	the hunter traced them to revealRoom, sync_game_state, the second dialog, and the takeover watchdog	tests/round-sync.test.js, public/script.js	VERIFIED decisions, page loaded the module, two-client round not run

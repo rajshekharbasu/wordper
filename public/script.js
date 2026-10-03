@@ -83,6 +83,7 @@ let reclaimingSeat = false;
 let connectionLost = false;
 let reconnectInProgress = false;
 let clockPausedByConnection = false;
+let roundSubmitted = false;
 let recoveringAsFormerHost = false;
 let reconnectCleanupTimer = null;
 const intentionallyClosedChannels = new WeakSet();
@@ -409,13 +410,20 @@ function enforceNameUniqueness() {
 }
 
 function revealRoom() {
+    const rebuild = WordperfectRoundSync.shouldRebuildRound(
+        isPlaying,
+        roundSubmitted,
+        screenBoot.classList.contains('active'),
+        screenLobby.classList.contains('active'),
+        screenResults.classList.contains('active')
+    );
     hideOverlay(screenBoot);
-    if (isPlaying) {
+    if (isPlaying || roundSubmitted || screenResults.classList.contains('active')) {
         hideOverlay(screenLobby);
-        initRound(timeLeft);
-    } else {
-        showOverlay(screenLobby);
+        if (rebuild) initRound(timeLeft);
+        return;
     }
+    showOverlay(screenLobby);
 }
 
 function confirmRoomExists() {
@@ -473,12 +481,35 @@ function stopBootTips() {
     bootTipTimer = null;
 }
 
+const DICTIONARY_URL = 'https://raw.githubusercontent.com/MagicOctopusUrn/wordListsByLength/master/unsorted.txt';
+const DICTIONARY_CACHE = 'wordperfect-dictionary-v1';
+
+// GitHub answers this file with max-age=300, so a normal reload fetches it again
+// after five minutes. The Cache API keeps the copy until we change the cache name.
+async function loadDictionaryText() {
+    if (!('caches' in window)) {
+        const response = await fetch(DICTIONARY_URL);
+        if (!response.ok) throw new Error('dictionary');
+        return response.text();
+    }
+    const cache = await caches.open(DICTIONARY_CACHE);
+    const hit = await cache.match(DICTIONARY_URL);
+    if (hit) return hit.text();
+    const response = await fetch(DICTIONARY_URL);
+    if (!response.ok) throw new Error('dictionary');
+    try {
+        await cache.put(DICTIONARY_URL, response.clone());
+    } catch (err) {
+        console.error(err);
+    }
+    return response.text();
+}
+
 async function bootEngine() {
     const bootLoading = document.getElementById('boot-loading');
     startBootTips();
     try {
-        const response = await fetch('https://raw.githubusercontent.com/MagicOctopusUrn/wordListsByLength/master/unsorted.txt');
-        const text = await response.text();
+        const text = await loadDictionaryText();
         const words = text.split(/\r?\n/).filter(word => word.trim().length > 0);
         dictionarySet = new Set(words.map(word => word.trim().toUpperCase()));
 
@@ -870,9 +901,14 @@ function restoreClaimedSeat(seat) {
 function showConnectionError(message = 'Rejoin within 3 minutes to reclaim your seat, score, and current-round words.') {
     connectionLost = true;
     reconnectInProgress = false;
-    clockPausedByConnection = timerInterval != null;
-    clearInterval(timerInterval);
-    timerInterval = null;
+    clockPausedByConnection = WordperfectRoundSync.keepPauseFlag(
+        timerInterval != null,
+        clockPausedByConnection
+    );
+    if (timerInterval != null) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
     connectionRetryStatus.textContent = message;
     connectionRetryStatus.classList.remove('is-error');
     btnRejoinGame.disabled = false;
@@ -1047,12 +1083,14 @@ async function maybeElectNewHost() {
         });
 
         clearTimeout(finalizeWatchdog);
-        finalizeWatchdog = setTimeout(() => {
-            if (isHost && !roundFinalized) {
-                console.warn('Finalize watchdog fired after host takeover.');
-                finalizeRound();
-            }
-        }, 10000);
+        if (WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft)) {
+            finalizeWatchdog = setTimeout(() => {
+                if (isHost && !roundFinalized) {
+                    console.warn('Finalize watchdog fired after host takeover.');
+                    finalizeRound();
+                }
+            }, 10000);
+        }
     } finally {
         hostElectionInProgress = false;
     }
@@ -1372,6 +1410,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         isReady = false;
         isPlaying = true; // guests must lock this before countdown finishes
+        roundSubmitted = false;
         dropPausedClock();
         roundFinalized = false;
         resetReadyButtons();
@@ -1431,6 +1470,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             return;
         }
         if (!isHost) {
+            if (roundSubmitted) return;
+
             console.log("Received sync_game_state from host:", data);
             
             // Sync game parameters
@@ -1445,7 +1486,6 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
             const syncedLeft = typeof data.timeLeft === 'number' ? data.timeLeft : secondsPerRound;
 
-            // Persist to session storage
             sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
             sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
             sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
@@ -1454,13 +1494,13 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             sessionStorage.setItem('wordperfect_is_playing', 'true');
             sessionStorage.setItem('wordperfect_time_left', String(syncedLeft));
 
-            if (!isPlaying) {
+            if (WordperfectRoundSync.shouldEnterRoundFromSync(isPlaying, roundSubmitted)) {
                 hideOverlay(screenLobby);
                 hideOverlay(screenStandings);
                 hideOverlay(screenResults);
                 updateLobbyRoundText();
                 initRound(syncedLeft);
-            } else {
+            } else if (WordperfectRoundSync.shouldAdoptHostTime(clockPausedByConnection, isPlaying)) {
                 timeLeft = syncedLeft;
                 resumeRoundClock();
             }
@@ -1498,6 +1538,12 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         }
 
         dropPausedClock();
+        isPlaying = false;
+        roundSubmitted = true;
+        saveGameStateToSession();
+        wordInput.disabled = true;
+        sendBtn.disabled = true;
+        btnShuffle.disabled = true;
         hideOverlay(screenCountdown);
         showOverlay(screenResults);
 
@@ -1616,6 +1662,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         dropPausedClock();
         isPlaying = false;
+        roundSubmitted = false;
         currentRound = 1;
         myTotalScore = 0;
         myTotalWords = 0;
@@ -2125,6 +2172,7 @@ async function leaveRoomAndGoHome() {
     physicsWordBodies = [];
 
     isPlaying = false;
+    roundSubmitted = false;
     currentRound = 1;
     myTotalScore = 0;
     myTotalWords = 0;
@@ -3126,6 +3174,7 @@ function paintBoard() {
 
 // --- CORE LOOP ---
 function initRound(syncedTime = null) {
+    roundSubmitted = false;
     if (syncedTime !== null) {
         timeLeft = syncedTime;
     } else {
@@ -3219,6 +3268,7 @@ async function endRound() {
     }
 
     isPlaying = false;
+    roundSubmitted = true;
     saveGameStateToSession();
 
     // Clear the cached draft words for this round since it's completed
@@ -3576,8 +3626,32 @@ document.addEventListener("visibilitychange", () => {
         }
     }
 });
+// Matter is only used for the word pills in a round. The lobby never touches it,
+// so the boot document does not wait on matter.min.js.
+let matterLoad = null;
+function loadMatterScript() {
+    if (typeof Matter !== 'undefined') return Promise.resolve();
+    if (!matterLoad) {
+        matterLoad = new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js';
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('matter.min.js failed'));
+            document.head.appendChild(script);
+        });
+    }
+    return matterLoad;
+}
+
 // --- PHYSICS ENGINE INTEGRATION ---
 function initPhysics() {
+    if (typeof Matter === 'undefined') {
+        loadMatterScript().then(() => initPhysics()).catch((err) => {
+            console.error(err);
+        });
+        return;
+    }
+
     const canvas = document.getElementById('physics-canvas');
     if (!canvas) return;
 

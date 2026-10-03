@@ -19,8 +19,8 @@
   --bar-bg: rgba(245, 245, 247, 0.85);
   --bar-bg-mobile: rgba(245, 245, 247, 0.9);
 
-  --font-display: "SF Pro Display", "Inter", system-ui, -apple-system, sans-serif;
-  --font-text: "SF Pro Text", "Inter", system-ui, -apple-system, sans-serif;
+  --font-display: "SF Pro Display", system-ui, -apple-system, sans-serif;
+  --font-text: "SF Pro Text", system-ui, -apple-system, sans-serif;
 
   --rounded-none: 0px;
   --rounded-sm: 8px;
