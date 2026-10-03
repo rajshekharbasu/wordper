@@ -151,6 +151,29 @@ test('canAcceptWordSubmission may allow disconnected seat ids when provided', ()
     );
 });
 
+test('ledgerForRoundStart keeps earlier rounds and still zeros a new game', () => {
+    const players = [{ id: 'p1' }, { id: 'p2' }];
+    const ledger = integrity.createScoreLedger(players);
+    integrity.applyUniqueWordToLedger(ledger, 'p1', 6);
+
+    const roundTwo = integrity.ledgerForRoundStart(ledger, [{ id: 'p1' }, { id: 'p3' }], 2);
+    assert.strictEqual(roundTwo.p1.score, 6);
+    assert.strictEqual(roundTwo.p3.score, 0);
+
+    const newGame = integrity.ledgerForRoundStart(roundTwo, players, 1);
+    assert.strictEqual(newGame.p1.score, 0);
+    assert.notStrictEqual(newGame, roundTwo);
+});
+
+test('attributeWordsByPlayerId does not merge two players who share a display name', () => {
+    const byWord = integrity.attributeWordsByPlayerId(
+        { a: ['RAIN'], b: ['RAIN', 'SOLE'] },
+        [{ id: 'a', name: 'Ada' }, { id: 'b', name: 'Ada' }]
+    );
+    assert.deepStrictEqual(byWord.RAIN.map(author => author.id), ['a', 'b']);
+    assert.deepStrictEqual(byWord.SOLE.map(author => author.id), ['b']);
+});
+
 (async function main() {
     let failed = 0;
     for (const t of tests) {

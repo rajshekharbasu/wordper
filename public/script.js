@@ -380,9 +380,7 @@ function setJoinBusy(busy) {
 }
 
 // --- NAME UNIQUENESS ---
-// Scoring attributes each word to its author by NAME, so two players sharing one in the same
-// room silently merge their submissions: the collision rule stops firing between them and
-// the points all land on whoever the lookup finds first. Names must be unique per room.
+// Reclaim and the results list match on display name, so a room cannot hold two of the same one.
 const NAME_TAKEN_MSG = 'That name is already taken in this room. Pick another.';
 
 function nameKey(name) {
@@ -1788,8 +1786,11 @@ async function startGameAsHost() {
     dropDisconnectedSeatsForNextRound();
     cachedBoardWords = null;
     cachedBoardKey = '';
-    // Host-owned score ledger — never read presence.score when finalizing
-    hostScoreLedger = WordperfectIntegrity.createScoreLedger(activePlayersList);
+    hostScoreLedger = WordperfectIntegrity.ledgerForRoundStart(
+        hostScoreLedger,
+        activePlayersList,
+        currentRound
+    );
     persistHostScoreLedger();
     const newBoard = [];
     for (let i = 0; i < 16; i++) {
@@ -1951,8 +1952,6 @@ function scoreWord(word) {
 }
 
 async function calculateScoresAndBroadcast() {
-    let wordMap = {};
-
     // Human words already in hostSubmissions — bots try (by difficulty) not to cancel them
     const humanWordSet = new Set();
     for (const playerId of Object.keys(hostSubmissions)) {
@@ -1983,35 +1982,24 @@ async function calculateScoresAndBroadcast() {
     hostScoreLedger = WordperfectIntegrity.ensureScoreLedger(hostScoreLedger, tempPlayers);
     tempPlayers = WordperfectIntegrity.overlayLedgerScores(tempPlayers, hostScoreLedger);
 
-    // Map words to authors
-    for (let playerId in hostSubmissions) {
-        let words = hostSubmissions[playerId];
-        let player = tempPlayers.find(p => p.id === playerId) || activePlayersList.find(p => p.id === playerId);
-        let playerName = player ? player.name : "Unknown";
-
-        words.forEach(w => {
-            if (!wordMap[w]) wordMap[w] = [];
-            if (!wordMap[w].includes(playerName)) {
-                wordMap[w].push(playerName);
-            }
-        });
-    }
-
+    const wordAuthors = WordperfectIntegrity.attributeWordsByPlayerId(hostSubmissions, tempPlayers);
     let results = [];
 
-    for (let word in wordMap) {
-        let authors = wordMap[word];
+    for (let word in wordAuthors) {
+        let authors = wordAuthors[word];
         let isDuplicate = authors.length > 1;
         let points = isDuplicate ? 0 : scoreWord(word);
+        let authorNames = authors.map(author => author.name);
 
-        results.push({ word, authors, isDuplicate, points });
+        results.push({ word, authors: authorNames, isDuplicate, points });
 
         if (!isDuplicate) {
-            let playerRef = tempPlayers.find(p => p.name === authors[0]);
+            const authorId = authors[0].id;
+            const entry = WordperfectIntegrity.applyUniqueWordToLedger(
+                hostScoreLedger, authorId, points
+            );
+            let playerRef = tempPlayers.find(p => p.id === authorId);
             if (playerRef) {
-                const entry = WordperfectIntegrity.applyUniqueWordToLedger(
-                    hostScoreLedger, playerRef.id, points
-                );
                 playerRef.score = entry.score;
                 playerRef.totalWords = entry.totalWords;
             }
