@@ -11,8 +11,14 @@
         CLOSED: true
     };
 
+    // Supabase reconnects at 1s, then 2s, then 5s, then every 10s.
+    // A 3s grace opened this dialog on the third attempt, while the
+    // socket was still coming back and broadcast send() was falling
+    // back to REST. Fifteen seconds of actual silence is the outage.
+    const DEFAULT_GRACE_MS = 15000;
+
     function createConnectionRecovery(options = {}) {
-        const graceMs = options.graceMs == null ? 3000 : options.graceMs;
+        const graceMs = options.graceMs == null ? DEFAULT_GRACE_MS : options.graceMs;
         const visibleRetryMs = options.visibleRetryMs == null ? 1500 : options.visibleRetryMs;
         const setTimeoutFn = options.setTimeout || setTimeout;
         const clearTimeoutFn = options.clearTimeout || clearTimeout;
@@ -24,6 +30,7 @@
         let overlayVisible = false;
         let pendingTimer = null;
         let waitingForVisible = false;
+        let unhealthy = false;
 
         function clearPending() {
             if (pendingTimer != null) {
@@ -55,29 +62,51 @@
             }, delay);
         }
 
+        function markHealthy() {
+            const wasShowing = overlayVisible;
+            everJoined = true;
+            unhealthy = false;
+            overlayVisible = false;
+            clearPending();
+            if (wasShowing) onRecovered();
+        }
+
         return {
             handleStatus: function (status, ctx) {
                 ctx = ctx || {};
 
                 if (status === 'SUBSCRIBED') {
-                    const wasShowing = overlayVisible;
-                    everJoined = true;
-                    overlayVisible = false;
-                    clearPending();
-                    if (wasShowing) onRecovered();
+                    markHealthy();
                     return;
                 }
 
                 if (!DISCONNECT_STATUSES[status]) return;
 
                 if (ctx.intentionalClose) {
+                    unhealthy = false;
                     clearPending();
                     return;
                 }
 
                 if (!everJoined && !ctx.allowBeforeJoin) return;
+
+                unhealthy = true;
                 if (overlayVisible) return;
 
+                schedule(graceMs);
+            },
+
+            // Inbound room traffic, or a broadcast that actually reached
+            // Supabase over REST, means this player is still in the game.
+            // Restart the silence clock instead of treating CLOSED as final.
+            noteContact: function () {
+                if (!unhealthy) return;
+                const wasShowing = overlayVisible;
+                clearPending();
+                if (wasShowing) {
+                    overlayVisible = false;
+                    onRecovered();
+                }
                 schedule(graceMs);
             },
 
@@ -95,6 +124,7 @@
                 clearPending();
                 everJoined = false;
                 overlayVisible = false;
+                unhealthy = false;
             }
         };
     }
