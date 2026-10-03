@@ -160,6 +160,95 @@ test('reset cancels a pending overlay so leaving the room cannot flash CONNECTIO
     assert.deepStrictEqual(lost, []);
 });
 
+test('CLOSED while room traffic is still landing does not show CONNECTION LOST', () => {
+    const { clock, recovery, lost } = setup();
+    recovery.handleStatus('SUBSCRIBED');
+    recovery.handleStatus('CLOSED');
+    clock.advance(2000);
+    recovery.noteContact();
+    clock.advance(2000);
+    recovery.noteContact();
+    clock.advance(2999);
+    assert.deepStrictEqual(lost, []);
+});
+
+test('silence after the last sign of contact still shows CONNECTION LOST', () => {
+    const { clock, recovery, lost } = setup();
+    recovery.handleStatus('SUBSCRIBED');
+    recovery.handleStatus('CLOSED');
+    clock.advance(1000);
+    recovery.noteContact();
+    clock.advance(2999);
+    assert.deepStrictEqual(lost, []);
+    clock.advance(1);
+    assert.deepStrictEqual(lost, [4000]);
+});
+
+test('contact after the overlay is up dismisses it, then silence can show it again', () => {
+    const { clock, recovery, lost, recovered } = setup();
+    recovery.handleStatus('SUBSCRIBED');
+    recovery.handleStatus('CLOSED');
+    clock.advance(3000);
+    assert.deepStrictEqual(lost, [3000]);
+    recovery.noteContact();
+    assert.deepStrictEqual(recovered, [3000]);
+    clock.advance(2999);
+    assert.deepStrictEqual(lost, [3000]);
+    clock.advance(1);
+    assert.deepStrictEqual(lost, [3000, 6000]);
+});
+
+test('contact before the first join does not arm CONNECTION LOST', () => {
+    const { clock, recovery, lost } = setup();
+    recovery.noteContact();
+    clock.advance(10000);
+    assert.deepStrictEqual(lost, []);
+});
+
+test('a hidden tab that keeps receiving room traffic does not show CONNECTION LOST on return', () => {
+    const { clock, recovery, lost, setHidden } = setup();
+    recovery.handleStatus('SUBSCRIBED');
+    setHidden(true);
+    recovery.handleStatus('CHANNEL_ERROR');
+    clock.advance(3000);
+    recovery.noteContact();
+    clock.advance(2000);
+    recovery.noteContact();
+    setHidden(false);
+    recovery.handleVisibility();
+    recovery.handleStatus('SUBSCRIBED');
+    clock.advance(10000);
+    assert.deepStrictEqual(lost, []);
+});
+
+test('a later CLOSED does not push the original silence deadline back', () => {
+    const { clock, recovery, lost } = setup();
+    recovery.handleStatus('SUBSCRIBED');
+    recovery.handleStatus('CLOSED');
+    clock.advance(2000);
+    recovery.handleStatus('CLOSED');
+    clock.advance(999);
+    assert.deepStrictEqual(lost, []);
+    clock.advance(1);
+    assert.deepStrictEqual(lost, [3000]);
+});
+
+test('the default grace waits out a Supabase reconnect instead of firing at 3 seconds', () => {
+    const clock = createFakeClock();
+    const lost = [];
+    const recovery = createConnectionRecovery({
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onLost: () => lost.push(clock.now())
+    });
+    recovery.handleStatus('SUBSCRIBED');
+    recovery.handleStatus('CLOSED');
+    clock.advance(12000);
+    assert.deepStrictEqual(lost, []);
+    clock.advance(3000);
+    assert.deepStrictEqual(lost, [15000]);
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
     try {

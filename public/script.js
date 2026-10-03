@@ -82,6 +82,7 @@ let reclaimRequestPending = false;
 let reclaimingSeat = false;
 let connectionLost = false;
 let reconnectInProgress = false;
+let clockPausedByConnection = false;
 let recoveringAsFormerHost = false;
 let reconnectCleanupTimer = null;
 const intentionallyClosedChannels = new WeakSet();
@@ -99,8 +100,13 @@ function escapeHtml(str) {
 
 function getBroadcastData(response) {
     if (!response) return {};
-    if (response.payload && typeof response.payload === 'object') return response.payload;
-    return response;
+    const data = (response.payload && typeof response.payload === 'object')
+        ? response.payload
+        : response;
+    if (data && typeof data === 'object' && Object.keys(data).length > 0) {
+        noteRoomContact();
+    }
+    return data;
 }
 
 function getHostPlayerId() {
@@ -864,6 +870,7 @@ function restoreClaimedSeat(seat) {
 function showConnectionError(message = 'Rejoin within 3 minutes to reclaim your seat, score, and current-round words.') {
     connectionLost = true;
     reconnectInProgress = false;
+    clockPausedByConnection = timerInterval != null;
     clearInterval(timerInterval);
     timerInterval = null;
     connectionRetryStatus.textContent = message;
@@ -871,6 +878,50 @@ function showConnectionError(message = 'Rejoin within 3 minutes to reclaim your 
     btnRejoinGame.disabled = false;
     btnRejoinGame.textContent = 'Rejoin game';
     showOverlay(connectionErrorModal);
+}
+
+function dismissConnectionLoss() {
+    hideOverlay(connectionErrorModal);
+    connectionLost = false;
+    reconnectInProgress = false;
+}
+
+// The dialog closing is not proof the round is still live. round_results and
+// game_reset both arrive as "contact" before their handlers run, and isPlaying
+// is still true then. Only the host clock, or a host sync that names timeLeft,
+// may start it again.
+function resumeRoundClock() {
+    if (!clockPausedByConnection) return;
+    if (!isPlaying || timeLeft <= 0) return;
+    clockPausedByConnection = false;
+    startClock();
+}
+
+function dropPausedClock() {
+    clockPausedByConnection = false;
+    clearInterval(timerInterval);
+    timerInterval = null;
+}
+
+function noteRoomContact() {
+    connectionRecovery.noteContact();
+}
+
+// Broadcast send() resolves 'ok' immediately when ack is off, even if the
+// socket never delivered it. Only a REST fallback that returned ok is proof
+// the room is still reachable while the channel status says CLOSED.
+function watchRoomDelivery(channel) {
+    const send = channel.send.bind(channel);
+    channel.send = async function (args, opts) {
+        const adapter = channel.channelAdapter;
+        const canAsk = !!(adapter && typeof adapter.canPush === 'function');
+        const socketCanPush = canAsk && adapter.canPush();
+        const result = await send(args, opts);
+        // Missing canPush must not count. ack:false resolves 'ok' with no delivery.
+        if (result === 'ok' && canAsk && !socketCanPush) noteRoomContact();
+        return result;
+    };
+    return channel;
 }
 
 function setReconnectBusy(busy, message = '') {
@@ -881,8 +932,8 @@ function setReconnectBusy(busy, message = '') {
     connectionRetryStatus.classList.toggle('is-error', !busy && !!message);
 }
 
-// Phoenix/Supabase fires CHANNEL_ERROR on every socket blip and auto-rejoins.
-// Hold the overlay until that recovery actually fails.
+// Phoenix/Supabase fires CLOSED on every socket recycle and auto-rejoins.
+// The dialog waits for silence, not for the status string.
 const connectionRecovery = WordperfectConnectionRecovery.create({
     isHidden: () => document.hidden,
     onLost() {
@@ -893,7 +944,7 @@ const connectionRecovery = WordperfectConnectionRecovery.create({
         );
     },
     onRecovered() {
-        hideOverlay(connectionErrorModal);
+        dismissConnectionLoss();
     }
 });
 
@@ -1040,7 +1091,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     }
 
     // FIX: Explicitly configure the channel to accept Presence and Broadcast features
-    roomChannel = supabaseClient.channel(`room:${myRoomCode}`, {
+    roomChannel = watchRoomDelivery(supabaseClient.channel(`room:${myRoomCode}`, {
         config: {
             presence: {
                 key: myPlayerId,
@@ -1050,12 +1101,13 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 ack: false,
             }
         }
-    });
+    }));
     const channel = roomChannel;
 
     // 1. Presence Sync (Lobby Updates)
     const handlePresenceUpdate = () => {
         if (channel !== roomChannel) return;
+        noteRoomContact();
         const state = channel.presenceState();
 
         const livePresencePlayers = [];
@@ -1248,7 +1300,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     });
 
     roomChannel.on('broadcast', { event: 'claim_seat' }, async (response) => {
-        if (!isHost) return;
+        if (!isHost) {
+            noteRoomContact();
+            return;
+        }
         const data = getBroadcastData(response);
         const seat = disconnectedSeats.find(item => nameKey(item.name) === nameKey(data.name));
         if (!seat || !data.requesterId) {
@@ -1317,6 +1372,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         isReady = false;
         isPlaying = true; // guests must lock this before countdown finishes
+        dropPausedClock();
         roundFinalized = false;
         resetReadyButtons();
 
@@ -1405,15 +1461,18 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 updateLobbyRoundText();
                 initRound(syncedLeft);
             } else {
-                // Just sync the timeLeft
                 timeLeft = syncedLeft;
+                resumeRoundClock();
             }
         }
     });
 
     // Always bind — isHost can flip after failover; gate inside the handler
     roomChannel.on('broadcast', { event: 'submit_words' }, (response) => {
-        if (!isHost) return;
+        if (!isHost) {
+            noteRoomContact();
+            return;
+        }
         const data = getBroadcastData(response);
         if (!data.playerId) return;
         // Disconnected seats are host-filled from drafts — ignore spoofed broadcast ids
@@ -1438,6 +1497,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             return;
         }
 
+        dropPausedClock();
         hideOverlay(screenCountdown);
         showOverlay(screenResults);
 
@@ -1554,6 +1614,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             return;
         }
 
+        dropPausedClock();
+        isPlaying = false;
         currentRound = 1;
         myTotalScore = 0;
         myTotalWords = 0;
@@ -1603,6 +1665,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         if (status === 'SUBSCRIBED') {
             connectionLost = false;
             reconnectInProgress = false;
+            if (isHost) resumeRoundClock();
             reclaimingSeat = false;
             reclaimRequestPending = false;
             hideOverlay(connectionErrorModal);
@@ -2079,6 +2142,7 @@ async function leaveRoomAndGoHome() {
     reclaimingSeat = false;
     connectionLost = false;
     reconnectInProgress = false;
+    clockPausedByConnection = false;
     recoveringAsFormerHost = false;
     aiEnabled = true;
     isReady = false;
@@ -3124,6 +3188,7 @@ function initRound(syncedTime = null) {
 }
 
 function startClock() {
+    clockPausedByConnection = false;
     clearInterval(timerInterval);
     const paintClock = () => {
         const m = Math.floor(Math.max(timeLeft, 0) / 60).toString().padStart(2, '0');
