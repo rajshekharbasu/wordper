@@ -987,6 +987,11 @@ document.addEventListener('visibilitychange', () => {
 });
 
 
+const submitPresence = WordperfectPresenceSync.createLatest((payload) => {
+    if (!roomChannel) return;
+    return roomChannel.track(payload);
+});
+
 async function syncMyState() {
     if (!roomChannel) return;
 
@@ -1003,7 +1008,7 @@ async function syncMyState() {
         isHost: isHost,
         isPlaying: isPlaying,
         isPendingJoin: awaitingHostConfirm && !reclaimingSeat,
-        updatedAt: Date.now() // FIX: Forces Supabase to broadcast the change
+        updatedAt: Date.now()
     };
 
     if (isHost) {
@@ -1015,7 +1020,7 @@ async function syncMyState() {
         trackPayload.hostGeneration = hostGeneration;
     }
 
-    await roomChannel.track(trackPayload);
+    await submitPresence(trackPayload);
 }
 
 async function maybeElectNewHost() {
@@ -1259,15 +1264,14 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             renderStandingsScreen(activePlayersList, currentRound > 1 ? currentRound - 1 : 1);
         }
 
-        // Host checks if everyone is ready to start
-        if (isHost && activePlayersList.length > 0) {
-            const readyPlayers = activePlayersList.filter(p => !p.isDisconnected);
-            const allReady = readyPlayers.length > 0 && readyPlayers.every(p => p.isReady);
-
-            if (allReady && !isPlaying) {
-                console.log("Host detected all players are ready. Starting game...");
-                startGameAsHost();
-            }
+        if (WordperfectPresenceSync.shouldStartLobby({
+            isHost,
+            isPlaying,
+            isReady,
+            players: activePlayersList
+        })) {
+            console.log("Host detected all players are ready. Starting game...");
+            startGameAsHost();
         }
 
         // A host in presence is the proof we were waiting for. The roster it brings is also
@@ -1390,13 +1394,17 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     });
 
     roomChannel.on('broadcast', { event: 'trigger_game' }, (response) => {
-        console.log("Raw trigger_game response:", response); // For debugging
-
         const data = getBroadcastData(response);
         if (!isFromCurrentHost(data)) {
             console.warn('Ignoring trigger_game from non-host');
             return;
         }
+
+        const incomingBoard = Array.isArray(data.board) ? data.board.join('') : '';
+        const countdownAlreadyRunning = WordperfectPresenceSync.shouldRestartCountdown({
+            countdownRunning: !!countdownInterval,
+            sameBoard: incomingBoard.length > 0 && boardLetters.join('') === incomingBoard
+        }) === false;
 
         boardLetters = data.board;
         maxRounds = data.maxRounds || 3;
@@ -1413,7 +1421,6 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         roundFinalized = false;
         resetReadyButtons();
 
-        // Persist to session storage
         sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
         sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
         sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
@@ -1423,7 +1430,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         hideOverlay(screenLobby);
         hideOverlay(screenStandings);
-        startCountdown();
+        if (!countdownAlreadyRunning) startCountdown();
     });
 
     // Listen for request_sync (Host responds to rejoining clients)
@@ -1778,9 +1785,9 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     });
 }
 
-// --- HOST AUTHORITATIVE FUNCTIONS ---
 async function startGameAsHost() {
-    isPlaying = true; // FIX: Lock the game state so this doesn't double-fire
+    if (isPlaying || !roomChannel) return;
+    isPlaying = true;
     hostSubmissions = {};
     roundFinalized = false;
     dropDisconnectedSeatsForNextRound();
@@ -1798,19 +1805,31 @@ async function startGameAsHost() {
     }
 
     boardLetters = newBoard;
-    saveGameStateToSession();
-    await syncMyState();
+    hideOverlay(screenLobby);
+    hideOverlay(screenStandings);
+    startCountdown();
+    if (WordperfectPresenceSync.shouldPersistPlayingSession({
+        lobbyVisible: screenLobby.classList.contains('active'),
+        countdownVisible: screenCountdown.classList.contains('active')
+    })) {
+        saveGameStateToSession();
+    }
 
-    await roomChannel.send({
-        type: 'broadcast',
-        event: 'trigger_game',
-        payload: hostPayload({
-            board: newBoard,
-            maxRounds: maxRounds,
-            roundTime: secondsPerRound,
-            scoreMode: scoreMode
-        })
-    });
+    try {
+        await syncMyState();
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'trigger_game',
+            payload: hostPayload({
+                board: newBoard,
+                maxRounds: maxRounds,
+                roundTime: secondsPerRound,
+                scoreMode: scoreMode
+            })
+        });
+    } catch (err) {
+        console.error('Failed to announce round start', err);
+    }
 }
 
 function getAllValidBoardWords() {
@@ -2289,19 +2308,25 @@ btnJoinRoom.addEventListener('click', async () => {
     await joinRealtimeRoom(code, myPlayerName, false);
 });
 
-btnReadyUp.addEventListener('click', async () => {
+async function toggleReady(button, idleLabel) {
     isReady = !isReady;
-    btnReadyUp.style.backgroundColor = isReady ? 'var(--surface-black)' : 'var(--primary)';
-    btnReadyUp.textContent = isReady ? 'Waiting for others...' : lobbyReadyLabel();
+    button.style.backgroundColor = isReady ? 'var(--surface-black)' : 'var(--primary)';
+    button.textContent = isReady ? 'Waiting for others...' : idleLabel;
+    if (WordperfectPresenceSync.shouldStartLobby({
+        isHost,
+        isPlaying,
+        isReady,
+        players: activePlayersList
+    })) {
+        await startGameAsHost();
+        return;
+    }
     await syncMyState();
-});
+}
 
-btnStandingsReady.addEventListener('click', async () => {
-    isReady = !isReady;
-    btnStandingsReady.style.backgroundColor = isReady ? 'var(--surface-black)' : 'var(--primary)';
-    btnStandingsReady.textContent = isReady ? 'Waiting for others...' : 'Ready for Next Round';
-    await syncMyState();
-});
+btnReadyUp.addEventListener('click', () => toggleReady(btnReadyUp, lobbyReadyLabel()));
+
+btnStandingsReady.addEventListener('click', () => toggleReady(btnStandingsReady, 'Ready for Next Round'));
 
 btnStandingsViewWords.addEventListener('click', () => {
     hideOverlay(screenStandings);
