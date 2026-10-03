@@ -99,6 +99,28 @@
         return ledger[playerId];
     }
 
+    function ledgerForRoundStart(ledger, players, roundNumber) {
+        const round = Number(roundNumber);
+        const hasEntries = ledger && typeof ledger === 'object' && Object.keys(ledger).length > 0;
+        if (!(round > 1) || !hasEntries) return createScoreLedger(players);
+        return ensureScoreLedger(ledger, players);
+    }
+
+    function attributeWordsByPlayerId(submissions, players) {
+        const byWord = Object.create(null);
+        const roster = players || [];
+        Object.keys(submissions || {}).forEach(function (playerId) {
+            const player = roster.find(function (p) { return p && p.id === playerId; });
+            const name = player && player.name ? player.name : 'Unknown';
+            (submissions[playerId] || []).forEach(function (word) {
+                if (!byWord[word]) byWord[word] = [];
+                if (byWord[word].some(function (author) { return author.id === playerId; })) return;
+                byWord[word].push({ id: playerId, name: name });
+            });
+        });
+        return byWord;
+    }
+
     function overlayLedgerScores(players, ledger) {
         return (players || []).map(function (p) {
             const entry = ledger && ledger[p.id];
@@ -149,6 +171,8 @@
         verifyHostEvent: verifyHostEvent,
         createScoreLedger: createScoreLedger,
         ensureScoreLedger: ensureScoreLedger,
+        ledgerForRoundStart: ledgerForRoundStart,
+        attributeWordsByPlayerId: attributeWordsByPlayerId,
         applyUniqueWordToLedger: applyUniqueWordToLedger,
         overlayLedgerScores: overlayLedgerScores,
         canAcceptWordSubmission: canAcceptWordSubmission
