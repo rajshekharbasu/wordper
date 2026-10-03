@@ -884,9 +884,23 @@ function dismissConnectionLoss() {
     hideOverlay(connectionErrorModal);
     connectionLost = false;
     reconnectInProgress = false;
+}
+
+// The dialog closing is not proof the round is still live. round_results and
+// game_reset both arrive as "contact" before their handlers run, and isPlaying
+// is still true then. Only the host clock, or a host sync that names timeLeft,
+// may start it again.
+function resumeRoundClock() {
     if (!clockPausedByConnection) return;
+    if (!isPlaying || timeLeft <= 0) return;
     clockPausedByConnection = false;
-    if (isPlaying && timeLeft > 0) startClock();
+    startClock();
+}
+
+function dropPausedClock() {
+    clockPausedByConnection = false;
+    clearInterval(timerInterval);
+    timerInterval = null;
 }
 
 function noteRoomContact() {
@@ -899,13 +913,12 @@ function noteRoomContact() {
 function watchRoomDelivery(channel) {
     const send = channel.send.bind(channel);
     channel.send = async function (args, opts) {
-        const socketCanPush = !!(
-            channel.channelAdapter
-            && typeof channel.channelAdapter.canPush === 'function'
-            && channel.channelAdapter.canPush()
-        );
+        const adapter = channel.channelAdapter;
+        const canAsk = !!(adapter && typeof adapter.canPush === 'function');
+        const socketCanPush = canAsk && adapter.canPush();
         const result = await send(args, opts);
-        if (result === 'ok' && !socketCanPush) noteRoomContact();
+        // Missing canPush must not count. ack:false resolves 'ok' with no delivery.
+        if (result === 'ok' && canAsk && !socketCanPush) noteRoomContact();
         return result;
     };
     return channel;
@@ -1287,7 +1300,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     });
 
     roomChannel.on('broadcast', { event: 'claim_seat' }, async (response) => {
-        if (!isHost) return;
+        if (!isHost) {
+            noteRoomContact();
+            return;
+        }
         const data = getBroadcastData(response);
         const seat = disconnectedSeats.find(item => nameKey(item.name) === nameKey(data.name));
         if (!seat || !data.requesterId) {
@@ -1356,6 +1372,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         isReady = false;
         isPlaying = true; // guests must lock this before countdown finishes
+        dropPausedClock();
         roundFinalized = false;
         resetReadyButtons();
 
@@ -1444,15 +1461,18 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 updateLobbyRoundText();
                 initRound(syncedLeft);
             } else {
-                // Just sync the timeLeft
                 timeLeft = syncedLeft;
+                resumeRoundClock();
             }
         }
     });
 
     // Always bind — isHost can flip after failover; gate inside the handler
     roomChannel.on('broadcast', { event: 'submit_words' }, (response) => {
-        if (!isHost) return;
+        if (!isHost) {
+            noteRoomContact();
+            return;
+        }
         const data = getBroadcastData(response);
         if (!data.playerId) return;
         // Disconnected seats are host-filled from drafts — ignore spoofed broadcast ids
@@ -1477,6 +1497,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             return;
         }
 
+        dropPausedClock();
         hideOverlay(screenCountdown);
         showOverlay(screenResults);
 
@@ -1593,6 +1614,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             return;
         }
 
+        dropPausedClock();
+        isPlaying = false;
         currentRound = 1;
         myTotalScore = 0;
         myTotalWords = 0;
@@ -1642,7 +1665,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         if (status === 'SUBSCRIBED') {
             connectionLost = false;
             reconnectInProgress = false;
-            clockPausedByConnection = false;
+            if (isHost) resumeRoundClock();
             reclaimingSeat = false;
             reclaimRequestPending = false;
             hideOverlay(connectionErrorModal);
@@ -3165,6 +3188,7 @@ function initRound(syncedTime = null) {
 }
 
 function startClock() {
+    clockPausedByConnection = false;
     clearInterval(timerInterval);
     const paintClock = () => {
         const m = Math.floor(Math.max(timeLeft, 0) / 60).toString().padStart(2, '0');

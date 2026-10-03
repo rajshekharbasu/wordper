@@ -221,6 +221,18 @@ test('a hidden tab that keeps receiving room traffic does not show CONNECTION LO
     assert.deepStrictEqual(lost, []);
 });
 
+test('a later CLOSED does not push the original silence deadline back', () => {
+    const { clock, recovery, lost } = setup();
+    recovery.handleStatus('SUBSCRIBED');
+    recovery.handleStatus('CLOSED');
+    clock.advance(2000);
+    recovery.handleStatus('CLOSED');
+    clock.advance(999);
+    assert.deepStrictEqual(lost, []);
+    clock.advance(1);
+    assert.deepStrictEqual(lost, [3000]);
+});
+
 test('the default grace waits out a Supabase reconnect instead of firing at 3 seconds', () => {
     const clock = createFakeClock();
     const lost = [];
