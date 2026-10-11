@@ -112,6 +112,39 @@ test('host countdown does not restart when the same board is announced back', ()
     }), true);
 });
 
+test('a live or finished round does not restart when the same board is announced again', () => {
+    assert.equal(sync.shouldRestartCountdown({
+        countdownRunning: false,
+        roundClockRunning: true,
+        sameBoard: true,
+        incomingRound: 1,
+        currentRound: 1
+    }), false);
+    assert.equal(sync.shouldRestartCountdown({
+        countdownRunning: false,
+        roundClockRunning: false,
+        roundSubmitted: true,
+        sameBoard: true,
+        incomingRound: 1,
+        currentRound: 1
+    }), false);
+    assert.equal(sync.shouldRestartCountdown({
+        countdownRunning: false,
+        roundClockRunning: false,
+        roundSubmitted: true,
+        sameBoard: false,
+        incomingRound: 2,
+        currentRound: 2
+    }), true);
+    assert.equal(sync.shouldRestartCountdown({
+        countdownRunning: false,
+        roundClockRunning: true,
+        sameBoard: false,
+        incomingRound: 1,
+        currentRound: 2
+    }), false);
+});
+
 (async function main() {
     let failed = 0;
     for (const t of tests) {
