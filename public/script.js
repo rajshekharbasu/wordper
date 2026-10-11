@@ -84,6 +84,7 @@ let connectionLost = false;
 let reconnectInProgress = false;
 let clockPausedByConnection = false;
 let roundSubmitted = false;
+let appliedStartId = null;
 let recoveringAsFormerHost = false;
 let reconnectCleanupTimer = null;
 const intentionallyClosedChannels = new WeakSet();
@@ -1411,11 +1412,14 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             roundSubmitted: roundSubmitted,
             sameBoard: incomingBoard.length > 0 && boardLetters.join('') === incomingBoard,
             incomingRound: data.round,
-            currentRound: currentRound
+            currentRound: currentRound,
+            incomingStartId: data.startId,
+            appliedStartId: appliedStartId
         })) {
             return;
         }
 
+        if (data.startId != null) appliedStartId = data.startId;
         boardLetters = data.board;
         maxRounds = data.maxRounds || 3;
         secondsPerRound = data.roundTime || 60;
@@ -1795,9 +1799,16 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     });
 }
 
+function makeStartId() {
+    return typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
 async function startGameAsHost() {
     if (isPlaying || !roomChannel) return;
     isPlaying = true;
+    appliedStartId = makeStartId();
     hostSubmissions = {};
     roundFinalized = false;
     dropDisconnectedSeatsForNextRound();
@@ -1835,7 +1846,8 @@ async function startGameAsHost() {
                 maxRounds: maxRounds,
                 roundTime: secondsPerRound,
                 scoreMode: scoreMode,
-                round: currentRound
+                round: currentRound,
+                startId: appliedStartId
             })
         });
     } catch (err) {
@@ -2191,6 +2203,7 @@ async function leaveRoomAndGoHome() {
 
     isPlaying = false;
     roundSubmitted = false;
+    appliedStartId = null;
     currentRound = 1;
     myTotalScore = 0;
     myTotalWords = 0;
