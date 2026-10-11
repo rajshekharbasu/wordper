@@ -36,7 +36,14 @@
 
     function shouldRestartCountdown(state) {
         if (!state) return true;
-        return !(state.countdownRunning && state.sameBoard);
+        if (state.incomingRound != null && state.currentRound != null
+            && Number(state.incomingRound) < Number(state.currentRound)) {
+            return false;
+        }
+        if (state.sameBoard && (state.countdownRunning || state.roundClockRunning || state.roundSubmitted)) {
+            return false;
+        }
+        return true;
     }
 
     return {

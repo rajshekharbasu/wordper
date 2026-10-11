@@ -1401,10 +1401,16 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         }
 
         const incomingBoard = Array.isArray(data.board) ? data.board.join('') : '';
-        const countdownAlreadyRunning = WordperfectPresenceSync.shouldRestartCountdown({
+        if (!WordperfectPresenceSync.shouldRestartCountdown({
             countdownRunning: !!countdownInterval,
-            sameBoard: incomingBoard.length > 0 && boardLetters.join('') === incomingBoard
-        }) === false;
+            roundClockRunning: !!timerInterval,
+            roundSubmitted: roundSubmitted,
+            sameBoard: incomingBoard.length > 0 && boardLetters.join('') === incomingBoard,
+            incomingRound: data.round,
+            currentRound: currentRound
+        })) {
+            return;
+        }
 
         boardLetters = data.board;
         maxRounds = data.maxRounds || 3;
@@ -1430,7 +1436,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         hideOverlay(screenLobby);
         hideOverlay(screenStandings);
-        if (!countdownAlreadyRunning) startCountdown();
+        startCountdown();
     });
 
     // Listen for request_sync (Host responds to rejoining clients)
@@ -1824,7 +1830,8 @@ async function startGameAsHost() {
                 board: newBoard,
                 maxRounds: maxRounds,
                 roundTime: secondsPerRound,
-                scoreMode: scoreMode
+                scoreMode: scoreMode,
+                round: currentRound
             })
         });
     } catch (err) {
