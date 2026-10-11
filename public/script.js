@@ -830,7 +830,11 @@ function rememberDepartedPlayers(departed) {
         const seat = makeDisconnectedSeat(player);
         disconnectedSeats.push(seat);
         if (!roundFinalized && boardLetters.length === 16) {
-            hostSubmissions[seat.id] = sanitizeSubmittedWords(seat.draftedWords);
+            WordperfectIntegrity.keepLockedSubmission(
+                hostSubmissions,
+                seat.id,
+                sanitizeSubmittedWords(seat.draftedWords)
+            );
         }
         scheduleDisconnectedSeatCleanup();
         changed = true;
@@ -3305,7 +3309,11 @@ async function endRound() {
 
     if (isHost) {
         disconnectedSeats.forEach(seat => {
-            hostSubmissions[seat.id] = sanitizeSubmittedWords(seat.draftedWords || []);
+            WordperfectIntegrity.keepLockedSubmission(
+                hostSubmissions,
+                seat.id,
+                sanitizeSubmittedWords(seat.draftedWords || [])
+            );
         });
     }
 
