@@ -145,6 +145,28 @@ test('a live or finished round does not restart when the same board is announced
     }), false);
 });
 
+test('a new round still starts when it draws the same letters', () => {
+    assert.equal(sync.shouldRestartCountdown({
+        countdownRunning: false,
+        roundClockRunning: false,
+        roundSubmitted: true,
+        sameBoard: true,
+        incomingRound: 2,
+        currentRound: 2,
+        incomingStartId: 'round-2',
+        appliedStartId: 'round-1'
+    }), true);
+    assert.equal(sync.shouldRestartCountdown({
+        countdownRunning: false,
+        roundClockRunning: true,
+        sameBoard: true,
+        incomingRound: 1,
+        currentRound: 1,
+        incomingStartId: 'round-1',
+        appliedStartId: 'round-1'
+    }), false);
+});
+
 (async function main() {
     let failed = 0;
     for (const t of tests) {
