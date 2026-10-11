@@ -165,6 +165,20 @@ test('ledgerForRoundStart keeps earlier rounds and still zeros a new game', () =
     assert.notStrictEqual(newGame, roundTwo);
 });
 
+test('a locked word list survives a later disconnect draft', () => {
+    const submissions = { p1: ['STAIN', 'RAIN'] };
+    const kept = integrity.keepLockedSubmission(submissions, 'p1', []);
+    assert.deepStrictEqual(kept.p1, ['STAIN', 'RAIN']);
+
+    const open = {};
+    integrity.keepLockedSubmission(open, 'p2', ['RAIN']);
+    assert.deepStrictEqual(open.p2, ['RAIN']);
+
+    const lockedEmpty = { p1: [] };
+    integrity.keepLockedSubmission(lockedEmpty, 'p1', ['RAIN']);
+    assert.deepStrictEqual(lockedEmpty.p1, []);
+});
+
 test('attributeWordsByPlayerId does not merge two players who share a display name', () => {
     const byWord = integrity.attributeWordsByPlayerId(
         { a: ['RAIN'], b: ['RAIN', 'SOLE'] },
