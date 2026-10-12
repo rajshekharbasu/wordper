@@ -38,5 +38,10 @@ assert.equal(sync.shouldAdoptHostTime(false, true), false, 'a running guest cloc
 assert.equal(sync.shouldArmTakeoverWatchdog(false, 40), true, 'takeover after lock-in may score');
 assert.equal(sync.shouldArmTakeoverWatchdog(true, 0), true, 'a clock that already hit zero may score');
 assert.equal(sync.shouldArmTakeoverWatchdog(true, 25), false, 'a live round is not scored on the takeover timer');
+assert.equal(sync.shouldArmTakeoverWatchdog(false, 40, true), false, 'a scored round is not scored again on takeover');
+
+assert.equal(sync.shouldResubmitDraft(false, false), true, 'a locked round still waiting for results is resent');
+assert.equal(sync.shouldResubmitDraft(false, true), false, 'a round that already has results is not resent');
+assert.equal(sync.shouldResubmitDraft(true, false), false, 'a live round is not resent');
 
 console.log('ok round sync decisions');

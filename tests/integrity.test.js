@@ -165,6 +165,18 @@ test('ledgerForRoundStart keeps earlier rounds and still zeros a new game', () =
     assert.notStrictEqual(newGame, roundTwo);
 });
 
+test('a takeover ledger keeps the last official totals', () => {
+    const ledger = integrity.ledgerFromOfficialScores(
+        [{ id: 'host' }, { id: 'guest' }],
+        { host: { score: 4, totalWords: 1 }, guest: { score: 4, totalWords: 1 } }
+    );
+    assert.strictEqual(ledger.host.score, 4);
+    assert.strictEqual(ledger.guest.totalWords, 1);
+
+    const fresh = integrity.ledgerFromOfficialScores([{ id: 'guest' }], null);
+    assert.strictEqual(fresh.guest.score, 0);
+});
+
 test('a locked word list survives a later disconnect draft', () => {
     const submissions = { p1: ['STAIN', 'RAIN'] };
     const kept = integrity.keepLockedSubmission(submissions, 'p1', []);

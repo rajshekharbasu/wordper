@@ -63,7 +63,8 @@ let hostElectionInProgress = false;
 let lastKnownHostId = null;
 let hostGeneration = 0; // bumps on host election; soft auth for host-gated broadcasts
 let expectedHostGeneration = null; // guests mirror live host presence hostGeneration
-let hostScoreLedger = Object.create(null); // host-authoritative scores; never trust presence.score
+let hostScoreLedger = Object.create(null);
+let lastOfficialScores = Object.create(null);
 let lastKnownAiPlayers = []; // survives host leave so a new host can adopt the bots
 let reconcilingBots = false;
 let cachedBoardWords = null;
@@ -84,6 +85,7 @@ let connectionLost = false;
 let reconnectInProgress = false;
 let clockPausedByConnection = false;
 let roundSubmitted = false;
+let roundScored = false;
 let appliedStartId = null;
 let recoveringAsFormerHost = false;
 let reconnectCleanupTimer = null;
@@ -1046,14 +1048,6 @@ async function maybeElectNewHost() {
         isHost = true;
         lastKnownHostId = myPlayerId;
         bumpHostGeneration();
-        // Takeover starts at zero. Presence scores are forgeable; only a
-        // session restore (original host refresh) is a trusted ledger.
-        if (!hostScoreLedger || Object.keys(hostScoreLedger).length === 0) {
-            hostScoreLedger = WordperfectIntegrity.createScoreLedger(activePlayersList);
-        } else {
-            hostScoreLedger = WordperfectIntegrity.ensureScoreLedger(hostScoreLedger, activePlayersList);
-        }
-        persistHostScoreLedger();
         sessionStorage.setItem('wordperfect_is_host', 'true');
 
         disconnectedSeats = lastKnownDisconnectedSeats.map(seat => ({ ...seat }));
@@ -1066,6 +1060,16 @@ async function maybeElectNewHost() {
             disconnectedSeats.push(makeDisconnectedSeat(player));
         });
         scheduleDisconnectedSeatCleanup();
+
+        // Presence scores are forgeable. The last results broadcast is the
+        // roster everyone already saw, so a dropped host does not zero it.
+        const roster = [...activePlayersList, ...disconnectedSeats];
+        if (!hostScoreLedger || Object.keys(hostScoreLedger).length === 0) {
+            hostScoreLedger = WordperfectIntegrity.ledgerFromOfficialScores(roster, lastOfficialScores);
+        } else {
+            hostScoreLedger = WordperfectIntegrity.ensureScoreLedger(hostScoreLedger, roster);
+        }
+        persistHostScoreLedger();
 
         // Adopt the previous host's bots (presence drops them with the old host)
         if (myLocalAiPlayers.length === 0 && lastKnownAiPlayers.length > 0) {
@@ -1091,7 +1095,7 @@ async function maybeElectNewHost() {
         });
 
         clearTimeout(finalizeWatchdog);
-        if (WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft)) {
+        if (WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft, roundScored)) {
             finalizeWatchdog = setTimeout(() => {
                 if (isHost && !roundFinalized) {
                     console.warn('Finalize watchdog fired after host takeover.');
@@ -1431,6 +1435,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         isReady = false;
         isPlaying = true; // guests must lock this before countdown finishes
         roundSubmitted = false;
+        roundScored = false;
         dropPausedClock();
         roundFinalized = false;
         resetReadyButtons();
@@ -1472,7 +1477,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         const data = getBroadcastData(response);
         if (!isFromCurrentHost(data) || !roomChannel) return;
         // Already locked in for this round — resend so the host can score
-        if (!isPlaying && Array.isArray(draftedWords)) {
+        if (WordperfectRoundSync.shouldResubmitDraft(isPlaying, roundScored) && Array.isArray(draftedWords)) {
             await roomChannel.send({
                 type: 'broadcast',
                 event: 'submit_words',
@@ -1559,6 +1564,15 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         dropPausedClock();
         isPlaying = false;
         roundSubmitted = true;
+        roundScored = true;
+        lastOfficialScores = Object.create(null);
+        (data.players || []).forEach((player) => {
+            if (!player || player.id == null) return;
+            lastOfficialScores[player.id] = {
+                score: Number(player.score) || 0,
+                totalWords: Number(player.totalWords) || 0
+            };
+        });
         saveGameStateToSession();
         wordInput.disabled = true;
         sendBtn.disabled = true;
@@ -1682,7 +1696,9 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         dropPausedClock();
         isPlaying = false;
         roundSubmitted = false;
+        roundScored = false;
         currentRound = 1;
+        lastOfficialScores = Object.create(null);
         myTotalScore = 0;
         myTotalWords = 0;
         wordAttempts = 0;
@@ -2203,6 +2219,7 @@ async function leaveRoomAndGoHome() {
 
     isPlaying = false;
     roundSubmitted = false;
+    roundScored = false;
     appliedStartId = null;
     currentRound = 1;
     myTotalScore = 0;
@@ -2229,6 +2246,7 @@ async function leaveRoomAndGoHome() {
     hostGeneration = 0;
     expectedHostGeneration = null;
     hostScoreLedger = Object.create(null);
+    lastOfficialScores = Object.create(null);
     hostSubmissions = {};
     cachedBoardWords = null;
     cachedBoardKey = '';
@@ -3212,6 +3230,7 @@ function paintBoard() {
 // --- CORE LOOP ---
 function initRound(syncedTime = null) {
     roundSubmitted = false;
+    roundScored = false;
     if (syncedTime !== null) {
         timeLeft = syncedTime;
     } else {

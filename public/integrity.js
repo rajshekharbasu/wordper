@@ -99,6 +99,20 @@
         return ledger[playerId];
     }
 
+    function ledgerFromOfficialScores(players, official) {
+        const ledger = createScoreLedger(players);
+        const source = official && typeof official === 'object' ? official : {};
+        Object.keys(source).forEach(function (id) {
+            const entry = source[id];
+            if (!entry || typeof entry !== 'object') return;
+            ledger[id] = {
+                score: Number(entry.score) || 0,
+                totalWords: Number(entry.totalWords) || 0
+            };
+        });
+        return ledger;
+    }
+
     function ledgerForRoundStart(ledger, players, roundNumber) {
         const round = Number(roundNumber);
         const hasEntries = ledger && typeof ledger === 'object' && Object.keys(ledger).length > 0;
@@ -180,6 +194,7 @@
         createScoreLedger: createScoreLedger,
         ensureScoreLedger: ensureScoreLedger,
         ledgerForRoundStart: ledgerForRoundStart,
+        ledgerFromOfficialScores: ledgerFromOfficialScores,
         attributeWordsByPlayerId: attributeWordsByPlayerId,
         applyUniqueWordToLedger: applyUniqueWordToLedger,
         overlayLedgerScores: overlayLedgerScores,
