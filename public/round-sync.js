@@ -29,8 +29,15 @@
     }
 
     // Takeover may close a round that already ended. A live clock has to finish first.
-    function shouldArmTakeoverWatchdog(isPlaying, timeLeft) {
+    // A round that already published results must not be scored a second time.
+    function shouldArmTakeoverWatchdog(isPlaying, timeLeft, roundScored) {
+        if (roundScored) return false;
         return !isPlaying || timeLeft <= 0;
+    }
+
+    // Locked-in words are resent only while the room is still waiting on that round.
+    function shouldResubmitDraft(isPlaying, roundScored) {
+        return !isPlaying && !roundScored;
     }
 
     return {
@@ -38,6 +45,7 @@
         shouldRebuildRound: shouldRebuildRound,
         shouldEnterRoundFromSync: shouldEnterRoundFromSync,
         shouldAdoptHostTime: shouldAdoptHostTime,
-        shouldArmTakeoverWatchdog: shouldArmTakeoverWatchdog
+        shouldArmTakeoverWatchdog: shouldArmTakeoverWatchdog,
+        shouldResubmitDraft: shouldResubmitDraft
     };
 }));

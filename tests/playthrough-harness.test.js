@@ -80,6 +80,7 @@ function createBus() {
                 },
                 track(payload) {
                     room.presence.set(key, payload);
+                    entry.lastPayload = payload;
                     scheduleSync();
                     return Promise.resolve('ok');
                 },
@@ -114,8 +115,18 @@ function createBus() {
                 }
             };
 
-            const entry = { win, emit, broadcastHandlers };
+            const entry = { win, emit, broadcastHandlers, key };
             return channel;
+        },
+        disconnectWhere(roomCode, pred) {
+            const room = rooms.get('room:' + roomCode);
+            if (!room) throw new Error('no room ' + roomCode);
+            for (const entry of [...room.channels]) {
+                if (!entry.lastPayload || !pred(entry.lastPayload)) continue;
+                room.channels.delete(entry);
+                room.presence.delete(entry.key);
+            }
+            for (const entry of room.channels) entry.win.setTimeout(() => entry.emit(), 0);
         }
     };
 }
@@ -380,6 +391,129 @@ async function main() {
     }
 }
 
+async function bootPair(bus) {
+    const hostDom = bootDom(bus);
+    const guestDom = bootDom(bus);
+    const host = hostDom.window;
+    const guest = guestDom.window;
+    const windows = [host, guest];
+    await waitFor(windows, () => !host.document.getElementById('multiplayer-controls').classList.contains('hidden'), 2000, 'dictionary boot');
+    host.document.getElementById('input-player-name').value = 'Ada';
+    host.document.getElementById('btn-create-room').click();
+    await waitFor(windows, () => active(host, 'screen-lobby'), 2000, 'host lobby');
+    const code = text(host, 'display-room-code');
+    guest.document.getElementById('input-player-name').value = 'Bea';
+    guest.document.getElementById('input-room-code').value = code;
+    guest.document.getElementById('btn-join-room').click();
+    await waitFor(windows, () => active(guest, 'screen-lobby') && text(host, 'lobby-player-list').includes('Bea'), 2000, 'guest in lobby');
+    return { hostDom, guestDom, host, guest, windows, code };
+}
+
+function submitWord(win, word) {
+    const input = win.document.getElementById('word-input');
+    const form = win.document.getElementById('word-form');
+    input.value = word;
+    form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+}
+
+async function hostLeavesAfterAScoredRound() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        await playRound(room.windows, room.host, room.guest);
+        await waitFor(room.windows, () => active(room.host, 'screen-results'), 2000, 'round 1 results');
+        const hostTotal = text(room.host, 'total-score-display');
+        const guestTotal = text(room.guest, 'total-score-display');
+        assert(hostTotal === 'Total: 4 pts' && guestTotal === 'Total: 4 pts', 'round 1 totals host=' + hostTotal + ' guest=' + guestTotal);
+
+        bus.disconnectWhere(room.code, (payload) => payload.isHost);
+        await pump(room.windows, 800);
+        const afterDrop = text(room.guest, 'total-score-display');
+        const afterTitle = text(room.guest, 'results-title');
+        const afterRound = text(room.guest, 'nav-round-display');
+        assert(afterDrop === 'Total: 4 pts', 'guest total changed when the host dropped, saw ' + JSON.stringify(afterDrop) + ' title=' + afterTitle + ' round=' + afterRound);
+        assert(afterTitle === 'Round 1 Results', 'dropping the host changed the round, title=' + JSON.stringify(afterTitle) + ' round=' + afterRound);
+
+        room.guest.document.getElementById('btn-standings-ready').click();
+        await pump(room.windows, 6000);
+        const tiles = [...room.guest.document.querySelectorAll('.tile')].map((tile) => tile.textContent.trim());
+        const word = tiles.slice(0, 4).join('');
+        submitWord(room.guest, word);
+        await pump(room.windows, 200);
+        room.guest.document.getElementById('submit-round').click();
+        await pump(room.windows, 800);
+        const round2 = text(room.guest, 'total-score-display');
+        const roundLabel = text(room.guest, 'results-title');
+        assert(round2 === 'Total: 8 pts', 'after the host dropped, the next round showed ' + JSON.stringify(round2) + ' (' + roundLabel + ') for ' + word);
+        console.log('PASS score survives host drop', round2, roundLabel);
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
 test('a slow host presence still joins, and round points carry', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
     await main();
+});
+
+async function lockedWordSurvivesMidRoundHostDrop() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        room.guest.document.getElementById('btn-ready-up').click();
+        await pump(room.windows, 200);
+        room.host.document.getElementById('btn-ready-up').click();
+        await pump(room.windows, 6000);
+        const tiles = [...room.guest.document.querySelectorAll('.tile')].map((tile) => tile.textContent.trim());
+        const word = tiles.slice(0, 4).join('');
+        submitWord(room.guest, word);
+        await pump(room.windows, 100);
+        room.guest.document.getElementById('submit-round').click();
+        await pump(room.windows, 200);
+        assert(!active(room.guest, 'screen-results'), 'the round scored before the host locked in');
+
+        bus.disconnectWhere(room.code, (payload) => payload.isHost);
+        await pump(room.windows, 800);
+        const total = text(room.guest, 'total-score-display');
+        assert(total === 'Total: 4 pts', 'a locked word was dropped with the host, saw ' + JSON.stringify(total) + ' for ' + word);
+        console.log('PASS locked word survives host drop');
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+async function sameNameIsRejected() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    const twinDom = bootDom(bus);
+    const twin = twinDom.window;
+    try {
+        await waitFor([twin], () => !twin.document.getElementById('multiplayer-controls').classList.contains('hidden'), 2000, 'twin boot');
+        twin.document.getElementById('input-player-name').value = 'Bea';
+        twin.document.getElementById('input-room-code').value = room.code;
+        twin.document.getElementById('btn-join-room').click();
+        await pump([twin, ...room.windows], 1000);
+        const status = text(twin, 'join-error-msg');
+        const roster = text(room.host, 'lobby-player-list');
+        assert(/already taken/i.test(status), 'a second Bea joined, status=' + JSON.stringify(status) + ' roster=' + roster);
+        assert(roster.split('Bea').length === 2, 'host roster listed two Beas: ' + roster);
+        console.log('PASS same name rejected');
+    } finally {
+        twinDom.window.close();
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+test('points survive the host dropping', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+    await hostLeavesAfterAScoredRound();
+});
+
+test('a locked word still scores if the host drops first', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+    await lockedWordSurvivesMidRoundHostDrop();
+});
+
+test('a second player cannot take a name already in the room', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+    await sameNameIsRejected();
 });
