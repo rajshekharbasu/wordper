@@ -84,6 +84,7 @@ let connectionLost = false;
 let reconnectInProgress = false;
 let clockPausedByConnection = false;
 let roundSubmitted = false;
+let appliedStartId = null;
 let recoveringAsFormerHost = false;
 let reconnectCleanupTimer = null;
 const intentionallyClosedChannels = new WeakSet();
@@ -361,7 +362,7 @@ function prefersReducedMotion() {
 // the room is real, so guests stay on the boot screen until one shows up.
 let awaitingHostConfirm = false;
 let roomProbeTimer = null;
-const ROOM_PROBE_MS = 3000;
+const ROOM_PROBE_MS = WordperfectConnectionRecovery.graceMs;
 
 function showJoinStatus(msg, isError) {
     joinErrorMsg.textContent = msg;
@@ -830,7 +831,11 @@ function rememberDepartedPlayers(departed) {
         const seat = makeDisconnectedSeat(player);
         disconnectedSeats.push(seat);
         if (!roundFinalized && boardLetters.length === 16) {
-            hostSubmissions[seat.id] = sanitizeSubmittedWords(seat.draftedWords);
+            WordperfectIntegrity.keepLockedSubmission(
+                hostSubmissions,
+                seat.id,
+                sanitizeSubmittedWords(seat.draftedWords)
+            );
         }
         scheduleDisconnectedSeatCleanup();
         changed = true;
@@ -1401,11 +1406,20 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         }
 
         const incomingBoard = Array.isArray(data.board) ? data.board.join('') : '';
-        const countdownAlreadyRunning = WordperfectPresenceSync.shouldRestartCountdown({
+        if (!WordperfectPresenceSync.shouldRestartCountdown({
             countdownRunning: !!countdownInterval,
-            sameBoard: incomingBoard.length > 0 && boardLetters.join('') === incomingBoard
-        }) === false;
+            roundClockRunning: !!timerInterval,
+            roundSubmitted: roundSubmitted,
+            sameBoard: incomingBoard.length > 0 && boardLetters.join('') === incomingBoard,
+            incomingRound: data.round,
+            currentRound: currentRound,
+            incomingStartId: data.startId,
+            appliedStartId: appliedStartId
+        })) {
+            return;
+        }
 
+        if (data.startId != null) appliedStartId = data.startId;
         boardLetters = data.board;
         maxRounds = data.maxRounds || 3;
         secondsPerRound = data.roundTime || 60;
@@ -1430,7 +1444,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         hideOverlay(screenLobby);
         hideOverlay(screenStandings);
-        if (!countdownAlreadyRunning) startCountdown();
+        startCountdown();
     });
 
     // Listen for request_sync (Host responds to rejoining clients)
@@ -1785,9 +1799,16 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     });
 }
 
+function makeStartId() {
+    return typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
 async function startGameAsHost() {
     if (isPlaying || !roomChannel) return;
     isPlaying = true;
+    appliedStartId = makeStartId();
     hostSubmissions = {};
     roundFinalized = false;
     dropDisconnectedSeatsForNextRound();
@@ -1824,7 +1845,9 @@ async function startGameAsHost() {
                 board: newBoard,
                 maxRounds: maxRounds,
                 roundTime: secondsPerRound,
-                scoreMode: scoreMode
+                scoreMode: scoreMode,
+                round: currentRound,
+                startId: appliedStartId
             })
         });
     } catch (err) {
@@ -2180,6 +2203,7 @@ async function leaveRoomAndGoHome() {
 
     isPlaying = false;
     roundSubmitted = false;
+    appliedStartId = null;
     currentRound = 1;
     myTotalScore = 0;
     myTotalWords = 0;
@@ -3280,6 +3304,11 @@ async function endRound() {
         attemptSubmitWord(wordInput.value);
     }
 
+    // Ready stays true from the lobby click. Dropping isPlaying first makes the host
+    // look idle-and-ready, so the next presence tick starts another round and, while
+    // currentRound is still this one, zeros the score ledger.
+    isReady = false;
+    resetReadyButtons();
     isPlaying = false;
     roundSubmitted = true;
     saveGameStateToSession();
@@ -3298,7 +3327,11 @@ async function endRound() {
 
     if (isHost) {
         disconnectedSeats.forEach(seat => {
-            hostSubmissions[seat.id] = sanitizeSubmittedWords(seat.draftedWords || []);
+            WordperfectIntegrity.keepLockedSubmission(
+                hostSubmissions,
+                seat.id,
+                sanitizeSubmittedWords(seat.draftedWords || [])
+            );
         });
     }
 

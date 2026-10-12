@@ -134,6 +134,14 @@
         });
     }
 
+    function keepLockedSubmission(submissions, playerId, draftWords) {
+        const bag = submissions && typeof submissions === 'object' ? submissions : Object.create(null);
+        if (playerId == null || playerId === '') return bag;
+        if (Object.prototype.hasOwnProperty.call(bag, playerId)) return bag;
+        bag[playerId] = draftWords;
+        return bag;
+    }
+
     /**
      * Accept submit_words only for ids currently in live presence (or reclaim seats).
      * firstWriteWins blocks later overwrites (incl. some spoof races).
@@ -175,6 +183,7 @@
         attributeWordsByPlayerId: attributeWordsByPlayerId,
         applyUniqueWordToLedger: applyUniqueWordToLedger,
         overlayLedgerScores: overlayLedgerScores,
+        keepLockedSubmission: keepLockedSubmission,
         canAcceptWordSubmission: canAcceptWordSubmission
     };
 }));

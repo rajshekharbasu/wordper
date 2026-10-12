@@ -17,5 +17,8 @@
     "express": "^5.2.1",
     "flicker-dot": "^0.1.4",
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
   }
 }
