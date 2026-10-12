@@ -131,6 +131,7 @@
 
     return {
         create: createConnectionRecovery,
-        createConnectionRecovery: createConnectionRecovery
+        createConnectionRecovery: createConnectionRecovery,
+        graceMs: DEFAULT_GRACE_MS
     };
 }));

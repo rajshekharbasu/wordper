@@ -362,7 +362,7 @@ function prefersReducedMotion() {
 // the room is real, so guests stay on the boot screen until one shows up.
 let awaitingHostConfirm = false;
 let roomProbeTimer = null;
-const ROOM_PROBE_MS = 3000;
+const ROOM_PROBE_MS = WordperfectConnectionRecovery.graceMs;
 
 function showJoinStatus(msg, isError) {
     joinErrorMsg.textContent = msg;
@@ -3304,6 +3304,11 @@ async function endRound() {
         attemptSubmitWord(wordInput.value);
     }
 
+    // Ready stays true from the lobby click. Dropping isPlaying first makes the host
+    // look idle-and-ready, so the next presence tick starts another round and, while
+    // currentRound is still this one, zeros the score ledger.
+    isReady = false;
+    resetReadyButtons();
     isPlaying = false;
     roundSubmitted = true;
     saveGameStateToSession();
