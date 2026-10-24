@@ -395,6 +395,140 @@ test('createHostElectionGrace does not start when host is live', () => {
     assert.strictEqual(grace.isPending(), false);
 });
 
+// --- SUPABASE RATE LIMIT SIMULATION TEST ---
+
+function createRateLimitEnforcer(maxCalls, windowMs, nowFn) {
+    const calls = [];
+    return {
+        track(payload) {
+            const now = nowFn();
+            // Remove calls outside the window
+            while (calls.length > 0 && calls[0] < now - windowMs) {
+                calls.shift();
+            }
+            if (calls.length >= maxCalls) {
+                throw new Error('Client presence rate limit exceeded');
+            }
+            calls.push(now);
+            return Promise.resolve();
+        },
+        getCallCount() {
+            return calls.length;
+        }
+    };
+}
+
+test('createThrottled with 2500ms spacing stays under 6-per-14s Supabase limit during rapid join sequence', async () => {
+    const clock = createFakeClock();
+    const rateLimiter = createRateLimitEnforcer(6, 14000, clock.now);
+    let errorCount = 0;
+    let successCount = 0;
+    
+    const throttled = sync.createThrottled(
+        (payload) => {
+            try {
+                rateLimiter.track(payload);
+                successCount++;
+                return Promise.resolve();
+            } catch (e) {
+                errorCount++;
+                return Promise.reject(e);
+            }
+        },
+        {
+            throttleMs: 2500,
+            setTimeout: clock.setTimeout,
+            clearTimeout: clock.clearTimeout,
+            now: clock.now
+        }
+    );
+
+    // Simulate rapid join sequence: SUBSCRIBED triggers syncMyState, then multiple presence events
+    throttled.submit({ event: 'subscribe', isReady: false }); // t=0
+    await Promise.resolve();
+    
+    // Simulate presence sync triggers
+    throttled.submit({ event: 'presence1', isReady: false }); // should be throttled
+    throttled.submit({ event: 'presence2', isReady: true });  // should be coalesced
+    throttled.submit({ event: 'confirm', isReady: true });    // should be coalesced
+    
+    await Promise.resolve();
+    assert.strictEqual(successCount, 1, 'only first call should succeed immediately');
+    assert.strictEqual(errorCount, 0, 'no rate limit errors yet');
+    
+    // Advance past throttle window
+    clock.advance(2500);
+    await Promise.resolve();
+    
+    assert.strictEqual(successCount, 2, 'trailing call should fire');
+    assert.strictEqual(errorCount, 0, 'still no rate limit errors');
+    
+    // Simulate more activity over 14 seconds (slider changes, ready toggles)
+    for (let i = 0; i < 10; i++) {
+        throttled.submit({ event: `activity${i}`, count: i });
+        clock.advance(2500); // Wait full throttle interval between submits
+        await Promise.resolve();
+    }
+    
+    // With 2500ms throttle, we get at most 6 calls in 14s (14000/2500 = 5.6)
+    assert.strictEqual(errorCount, 0, 'should never hit rate limit with 2500ms throttle');
+});
+
+test('without throttle, rapid calls would hit the 6-per-14s rate limit', async () => {
+    const clock = createFakeClock();
+    const rateLimiter = createRateLimitEnforcer(6, 14000, clock.now);
+    let errorCount = 0;
+    
+    // Simulate what would happen without throttle
+    for (let i = 0; i < 10; i++) {
+        try {
+            rateLimiter.track({ event: i });
+        } catch (e) {
+            errorCount++;
+        }
+    }
+    
+    assert.strictEqual(errorCount, 4, '10 rapid calls should cause 4 rate limit errors (6 allowed)');
+});
+
+test('createThrottled handles track failures gracefully', async () => {
+    const clock = createFakeClock();
+    let failCount = 0;
+    const throttled = sync.createThrottled(
+        (payload) => {
+            failCount++;
+            if (failCount <= 2) {
+                return Promise.reject(new Error('Track failed'));
+            }
+            return Promise.resolve();
+        },
+        {
+            throttleMs: 1000,
+            setTimeout: clock.setTimeout,
+            clearTimeout: clock.clearTimeout,
+            now: clock.now
+        }
+    );
+
+    // First call fails
+    try {
+        await throttled.submit({ attempt: 1 });
+    } catch (e) {
+        assert.strictEqual(e.message, 'Track failed');
+    }
+    
+    // After throttle window, try again
+    clock.advance(1000);
+    throttled.submit({ attempt: 2 });
+    await Promise.resolve();
+    
+    // Third attempt should succeed
+    clock.advance(1000);
+    await throttled.submit({ attempt: 3 });
+    
+    assert.strictEqual(failCount, 3, 'should have attempted 3 tracks');
+});
+
 (async function main() {
     let failed = 0;
     for (const t of tests) {

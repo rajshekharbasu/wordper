@@ -5,7 +5,7 @@
     }
     root.WordperfectPresenceSync = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-    var DEFAULT_THROTTLE_MS = 1000;
+    var DEFAULT_THROTTLE_MS = 2500;
     var DEFAULT_HOST_ELECTION_GRACE_MS = 3000;
 
     function createLatest(track) {

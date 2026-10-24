@@ -59,7 +59,24 @@ let hostSubmissions = {};
 let roundFinalized = false;
 let finalizeWatchdog = null;
 let activePlayersList = []; // Kept in sync via presence
+let broadcastScores = Object.create(null); // Scores via broadcast, not presence
 let hostElectionInProgress = false;
+
+function getPlayersWithScores(players) {
+    return players.map(p => {
+        const bs = broadcastScores[p.id];
+        if (bs) {
+            return {
+                ...p,
+                score: bs.score,
+                totalWords: bs.totalWords,
+                wordAttempts: bs.wordAttempts,
+                wordErrors: bs.wordErrors
+            };
+        }
+        return p;
+    });
+}
 let lastKnownHostId = null;
 let hostGeneration = 0; // bumps on host election; soft auth for host-gated broadcasts
 let expectedHostGeneration = null; // guests mirror live host presence hostGeneration
@@ -1007,26 +1024,68 @@ const reconnectManager = WordperfectConnectionRecovery.createReconnectManager({
     }
 });
 
+let reconnectResolve = null;
+let reconnectReject = null;
+
 async function attemptChannelReconnect() {
-    if (!roomChannel || intentionallyClosedChannels.has(roomChannel)) {
-        throw new Error('Channel intentionally closed');
+    if (!myRoomCode || !myPlayerName) {
+        throw new Error('No room to rejoin');
     }
-    const channel = roomChannel;
-    try {
-        await channel.unsubscribe();
-    } catch (e) {
-        console.warn('Error unsubscribing during reconnect:', e);
+    
+    const oldChannel = roomChannel;
+    if (oldChannel) {
+        try {
+            intentionallyClosedChannels.add(oldChannel);
+            await supabaseClient.removeChannel(oldChannel);
+        } catch (e) {
+            console.warn('Error removing old channel during reconnect:', e);
+        }
+        roomChannel = null;
     }
+    
+    reconnectInProgress = true;
+    
     return new Promise((resolve, reject) => {
-        channel.subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-                reconnectManager.success();
-                resolve();
-            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-                reject(new Error('Reconnect subscribe failed: ' + status));
-            }
-        });
+        reconnectResolve = resolve;
+        reconnectReject = reject;
+        
+        const timeoutId = setTimeout(() => {
+            reconnectResolve = null;
+            reconnectReject = null;
+            reject(new Error('Reconnect timed out'));
+        }, 15000);
+        
+        joinRealtimeRoom(myRoomCode, myPlayerName, isHost, true)
+            .then(() => {
+                // joinRealtimeRoom sets up the channel but SUBSCRIBED comes asynchronously
+                // The resolve/reject will be called from the subscribe callback
+            })
+            .catch((err) => {
+                clearTimeout(timeoutId);
+                reconnectResolve = null;
+                reconnectReject = null;
+                reject(err);
+            });
     });
+}
+
+function handleReconnectStatus(status) {
+    if (status === 'SUBSCRIBED') {
+        if (reconnectResolve) {
+            reconnectManager.success();
+            const resolve = reconnectResolve;
+            reconnectResolve = null;
+            reconnectReject = null;
+            resolve();
+        }
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        if (reconnectReject && reconnectInProgress) {
+            const reject = reconnectReject;
+            reconnectResolve = null;
+            reconnectReject = null;
+            reject(new Error('Reconnect failed: ' + status));
+        }
+    }
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -1054,14 +1113,9 @@ function buildTrackPayload() {
         id: myPlayerId,
         name: myPlayerName,
         isReady: isReady,
-        score: myTotalScore,
-        totalWords: myTotalWords,
-        wordAttempts: wordAttempts,
-        wordErrors: wordErrors,
         isHost: isHost,
         isPlaying: isPlaying,
-        isPendingJoin: awaitingHostConfirm && !reclaimingSeat,
-        updatedAt: Date.now()
+        isPendingJoin: awaitingHostConfirm && !reclaimingSeat
     };
 
     if (isHost) {
@@ -1073,6 +1127,30 @@ function buildTrackPayload() {
         trackPayload.hostGeneration = hostGeneration;
     }
     return trackPayload;
+}
+
+let lastBroadcastScoreState = null;
+async function broadcastScoreState() {
+    if (!roomChannel) return;
+    const scoreState = {
+        playerId: myPlayerId,
+        score: myTotalScore,
+        totalWords: myTotalWords,
+        wordAttempts: wordAttempts,
+        wordErrors: wordErrors
+    };
+    const stateKey = JSON.stringify(scoreState);
+    if (stateKey === lastBroadcastScoreState) return;
+    lastBroadcastScoreState = stateKey;
+    try {
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'player_score_update',
+            payload: scoreState
+        });
+    } catch (e) {
+        console.warn('Failed to broadcast score update:', e);
+    }
 }
 
 async function syncMyState() {
@@ -1174,7 +1252,8 @@ async function performHostElection() {
         });
 
         clearTimeout(finalizeWatchdog);
-        if (WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft, roundScored)) {
+        const hasActiveRound = boardLetters && boardLetters.length > 0 && appliedStartId != null;
+        if (hasActiveRound && WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft, roundScored)) {
             finalizeWatchdog = setTimeout(() => {
                 if (isHost && !roundFinalized) {
                     console.warn('Finalize watchdog fired after host takeover.');
@@ -1357,9 +1436,9 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         }
         reconcileBots(realPlayerCount);
 
-        renderLobbyPlayers(activePlayersList);
+        renderLobbyPlayers(getPlayersWithScores(activePlayersList));
         if (screenStandings.classList.contains('active')) {
-            renderStandingsScreen(activePlayersList, currentRound > 1 ? currentRound - 1 : 1);
+            renderStandingsScreen(getPlayersWithScores(activePlayersList), currentRound > 1 ? currentRound - 1 : 1);
         }
 
         if (WordperfectPresenceSync.shouldStartLobby({
@@ -1794,7 +1873,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             sessionStorage.setItem('wordperfect_total_score', myTotalScore.toString());
             sessionStorage.setItem('wordperfect_total_words', myTotalWords.toString());
             totalScoreDisplay.textContent = `Total: ${myTotalScore} pts`;
-            await syncMyState(); // Update presence with new score
+            await broadcastScoreState();
         }
 
         if (data.isGameOver) {
@@ -1827,6 +1906,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         roundScored = false;
         currentRound = 1;
         lastOfficialScores = Object.create(null);
+        broadcastScores = Object.create(null);
+        lastBroadcastScoreState = null;
         myTotalScore = 0;
         myTotalWords = 0;
         wordAttempts = 0;
@@ -1863,6 +1944,19 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         if (data.liked && Array.isArray(data.authorNames) && data.authorNames.includes(myPlayerName) && data.likerName !== myPlayerName) {
             showToast(`${data.likerName} liked ${data.word}`);
         }
+    });
+
+    // Player score updates via broadcast (not presence) to reduce presence traffic
+    roomChannel.on('broadcast', { event: 'player_score_update' }, (response) => {
+        const data = getBroadcastData(response);
+        if (!data.playerId) return;
+        broadcastScores[data.playerId] = {
+            score: Number(data.score) || 0,
+            totalWords: Number(data.totalWords) || 0,
+            wordAttempts: Number(data.wordAttempts) || 0,
+            wordErrors: Number(data.wordErrors) || 0,
+            updatedAt: Date.now()
+        };
     });
 
     // 3. Subscribe
@@ -1939,6 +2033,11 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             if (!intentionallyClosedChannels.has(channel)) {
                 console.warn('Realtime channel interrupted:', status);
             }
+        }
+        
+        // Handle reconnection status for pending reconnect attempts
+        if (reconnectInProgress) {
+            handleReconnectStatus(status);
         }
     });
 }
@@ -2353,6 +2452,12 @@ async function leaveRoomAndGoHome() {
     myTotalScore = 0;
     myTotalWords = 0;
     wordAttempts = 0;
+    broadcastScores = Object.create(null);
+    lastBroadcastScoreState = null;
+    reconnectResolve = null;
+    reconnectReject = null;
+    if (hostElectionGrace) hostElectionGrace.reset();
+    reconnectManager.reset();
     wordErrors = 0;
     myLocalAiPlayers = [];
     lastKnownAiPlayers = [];
