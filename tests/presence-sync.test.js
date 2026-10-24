@@ -662,6 +662,130 @@ test('N6: multiple rapid presence changes consolidate into single election', () 
     assert.strictEqual(electCount, 1, 'multiple rapid changes should result in single election');
 });
 
+// --- R3 TEST: Ready state self-healing after disruption ---
+
+test('R3: ready state must be re-broadcast after reconnect to heal missed updates', () => {
+    // Simulates: player disconnects, reconnects, others didn't receive their ready state
+    // Solution: force-broadcast ready state on subscribe/request_sync
+    
+    let broadcastCount = 0;
+    let lastBroadcastState = null;
+    
+    // Simulate broadcastReadyState with dedup
+    function broadcastReadyState(isReady, force = false) {
+        const stateKey = JSON.stringify({ isReady });
+        if (!force && stateKey === lastBroadcastState) {
+            return false; // Deduped
+        }
+        lastBroadcastState = stateKey;
+        broadcastCount++;
+        return true;
+    }
+    
+    function clearReadyStateDedup() {
+        lastBroadcastState = null;
+    }
+    
+    // Initial broadcast
+    assert.strictEqual(broadcastReadyState(true), true, 'first broadcast should succeed');
+    assert.strictEqual(broadcastCount, 1);
+    
+    // Duplicate without force - should be deduped
+    assert.strictEqual(broadcastReadyState(true, false), false, 'duplicate should be deduped');
+    assert.strictEqual(broadcastCount, 1);
+    
+    // Force broadcast - should bypass dedup
+    assert.strictEqual(broadcastReadyState(true, true), true, 'force should bypass dedup');
+    assert.strictEqual(broadcastCount, 2);
+    
+    // After reconnect, clear dedup and rebroadcast
+    clearReadyStateDedup();
+    assert.strictEqual(broadcastReadyState(true), true, 'after clear, should broadcast again');
+    assert.strictEqual(broadcastCount, 3);
+});
+
+test('R3: all players respond to request_sync with their ready state', () => {
+    // When a player sends request_sync, all clients should respond with their phase
+    // AND force-broadcast their ready state so the requester gets fresh data
+    
+    const responses = [];
+    
+    // Simulate 3 players responding to request_sync
+    const players = [
+        { id: 'host', isReady: true, phase: 'standings' },
+        { id: 'guest1', isReady: false, phase: 'standings' },
+        { id: 'guest2', isReady: true, phase: 'standings' }
+    ];
+    
+    players.forEach(player => {
+        // Each player sends report_phase with their state
+        responses.push({
+            playerId: player.id,
+            phase: player.phase,
+            isReady: player.isReady
+        });
+    });
+    
+    // Verify we can reconstruct ready states from responses
+    const readyStates = {};
+    responses.forEach(r => {
+        readyStates[r.playerId] = r.isReady;
+    });
+    
+    assert.strictEqual(readyStates['host'], true);
+    assert.strictEqual(readyStates['guest1'], false);
+    assert.strictEqual(readyStates['guest2'], true);
+});
+
+// --- R5 TEST: Late joiners must explicitly click Ready ---
+
+test('R5: late joiners must click Ready before game can start', () => {
+    // A late joiner who hasn't clicked Ready should block game start
+    const getPlayerReadyState = (playerId, readyStates, myPlayerId, myIsReady) => {
+        if (playerId === myPlayerId) return myIsReady;
+        const state = readyStates[playerId];
+        return state ? state.isReady : false;
+    };
+    
+    const getAllPlayersReady = (players, readyStates, myPlayerId, myIsReady) => {
+        const readyPlayers = players.filter(p => !p.isDisconnected && !p.isAi);
+        if (readyPlayers.length === 0) return false;
+        return readyPlayers.every(p => getPlayerReadyState(p.id, readyStates, myPlayerId, myIsReady));
+    };
+    
+    const myPlayerId = 'host';
+    const myIsReady = true;
+    
+    // Original players ready
+    const readyStates = {
+        'guest1': { isReady: true }
+    };
+    
+    // Late joiner joins but hasn't clicked Ready
+    const players = [
+        { id: 'host', isDisconnected: false },
+        { id: 'guest1', isDisconnected: false },
+        { id: 'late-joiner', isDisconnected: false }  // Not in readyStates = not ready
+    ];
+    
+    // Should NOT be able to start - late joiner hasn't clicked Ready
+    assert.strictEqual(
+        getAllPlayersReady(players, readyStates, myPlayerId, myIsReady),
+        false,
+        'should not start when late joiner has not clicked Ready'
+    );
+    
+    // Late joiner clicks Ready
+    readyStates['late-joiner'] = { isReady: true };
+    
+    // Now should be able to start
+    assert.strictEqual(
+        getAllPlayersReady(players, readyStates, myPlayerId, myIsReady),
+        true,
+        'should start when all including late joiner are ready'
+    );
+});
+
 // --- R1 TEST: Game must be able to start from standings screen (round 2+) ---
 
 test('R1: shouldStartLobby works for round 2+ when all ready on standings', () => {

@@ -324,6 +324,28 @@ let dictionarySet = new Set();
 let penaltyActive = false;
 let penaltyTimeLeft = 5;
 let penaltyInterval = null;
+let readyRefreshInterval = null;
+
+// Periodic ready state refresh for self-healing (re-broadcasts when on lobby/standings)
+function startReadyRefresh() {
+    stopReadyRefresh();
+    readyRefreshInterval = setInterval(async () => {
+        if (!roomChannel) return;
+        const onLobby = screenLobby && screenLobby.classList.contains('active');
+        const onStandings = screenStandings && screenStandings.classList.contains('active');
+        if ((onLobby || onStandings) && !isPlaying) {
+            // Force re-broadcast to heal any missed updates
+            await broadcastReadyState(true);
+        }
+    }, 5000);
+}
+
+function stopReadyRefresh() {
+    if (readyRefreshInterval) {
+        clearInterval(readyRefreshInterval);
+        readyRefreshInterval = null;
+    }
+}
 
 // --- DOM NODES ---
 const tiles = document.querySelectorAll('.tile');
@@ -1193,14 +1215,14 @@ async function broadcastScoreState() {
 }
 
 let lastBroadcastReadyState = null;
-async function broadcastReadyState() {
+async function broadcastReadyState(force = false) {
     if (!roomChannel) return;
     const readyState = {
         playerId: myPlayerId,
         isReady: isReady
     };
     const stateKey = JSON.stringify(readyState);
-    if (stateKey === lastBroadcastReadyState) return;
+    if (!force && stateKey === lastBroadcastReadyState) return;
     lastBroadcastReadyState = stateKey;
     try {
         await roomChannel.send({
@@ -1211,6 +1233,10 @@ async function broadcastReadyState() {
     } catch (e) {
         console.warn('Failed to broadcast ready update:', e);
     }
+}
+
+function clearReadyStateDedup() {
+    lastBroadcastReadyState = null;
 }
 
 async function syncMyState() {
@@ -1338,6 +1364,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         suppressAutoStart = true;
         // Clear broadcast ready states on recovery - we need fresh data from peers
         broadcastReadyStates = Object.create(null);
+        // Clear dedup so we re-broadcast our ready state
+        clearReadyStateDedup();
         // Clear suppression after a longer grace period, but only if still on lobby
         // (report_phase and sync_game_state handlers will clear it sooner when appropriate)
         setTimeout(() => {
@@ -1472,7 +1500,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         );
         
         activePlayersList = [...visibleLivePlayers, ...aiPlayersToAppend, ...deduplicatedSeats];
-        if (isHost && (departedChanged || reclaimedChanged)) syncMyState();
+        // Only sync if roster actually changed, and delay during active play to reduce rate limit pressure
+        if (isHost && (departedChanged || reclaimedChanged) && !isPlaying) {
+            syncMyState();
+        }
 
         // Cache bots whenever we see them — host leave removes them from presence, but
         // the elected replacement still needs the roster mid-round.
@@ -1727,9 +1758,15 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 playerId: myPlayerId, 
                 phase: phase,
                 currentRound: currentRound,
-                isReady: isReady
+                isReady: isReady,
+                board: boardLetters,
+                scores: lastOfficialScores
             }
         });
+        
+        // Force-broadcast ready state to ensure recovering clients get it
+        // This bypasses dedup since we're responding to a sync request
+        await broadcastReadyState(true);
         
         // Host also sends full sync_game_state
         if (isHost) {
@@ -1751,7 +1788,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                         activePlayersList
                             .filter(p => !p.isAi && !p.isDisconnected)
                             .map(p => [p.id, getPlayerReadyState(p.id)])
-                    )
+                    ),
+                    officialScores: lastOfficialScores
                 })
             });
         }
@@ -1791,6 +1829,29 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             
             console.log("Recovering host received phase report:", peerPhase, "round:", peerRound);
             
+            // Restore board from peer if we have an empty board
+            if (Array.isArray(data.board) && data.board.length > 0 && (!boardLetters || boardLetters.length === 0)) {
+                console.log("Restoring board from peer:", data.board);
+                boardLetters = data.board;
+                sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
+            }
+            
+            // Restore official scores from peer if we have empty scores
+            if (data.scores && typeof data.scores === 'object' && Object.keys(data.scores).length > 0) {
+                if (!lastOfficialScores || Object.keys(lastOfficialScores).length === 0) {
+                    console.log("Restoring scores from peer:", data.scores);
+                    lastOfficialScores = { ...data.scores };
+                    // Also update hostScoreLedger from these scores
+                    for (const [playerId, scoreData] of Object.entries(data.scores)) {
+                        if (!hostScoreLedger[playerId]) {
+                            hostScoreLedger[playerId] = { score: 0, totalWords: 0 };
+                        }
+                        hostScoreLedger[playerId].score = scoreData.score || 0;
+                        hostScoreLedger[playerId].totalWords = scoreData.totalWords || 0;
+                    }
+                }
+            }
+            
             // If peer is not in lobby, adopt their phase
             if (peerPhase !== 'lobby') {
                 console.log("Adopting peer phase:", peerPhase, "round:", peerRound);
@@ -1806,6 +1867,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 } else if (peerPhase === 'standings') {
                     showOverlay(screenStandings);
                     renderStandingsScreen(getPlayersWithScores(activePlayersList), peerRound > 1 ? peerRound - 1 : 1);
+                    startReadyRefresh();
                     recoveringAsFormerHost = false;
                     suppressAutoStart = false;
                 } else if (peerPhase === 'winner') {
@@ -1875,6 +1937,17 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                         updatedAt: Date.now()
                     };
                 }
+            }
+        }
+        
+        // Restore official scores from host (for late joiners/reconnecters)
+        if (data.officialScores && typeof data.officialScores === 'object') {
+            for (const [playerId, scoreData] of Object.entries(data.officialScores)) {
+                if (!lastOfficialScores[playerId]) {
+                    lastOfficialScores[playerId] = { score: 0, totalWords: 0 };
+                }
+                lastOfficialScores[playerId].score = scoreData.score || 0;
+                lastOfficialScores[playerId].totalWords = scoreData.totalWords || 0;
             }
         }
         
@@ -2091,6 +2164,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 hideOverlay(screenResults);
                 showOverlay(screenStandings);
                 renderStandingsScreen(data.players, data.currentRound);
+                startReadyRefresh();
             };
         }
     });
@@ -2184,6 +2258,14 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             renderStandingsScreen(getPlayersWithScores(activePlayersList), currentRound > 1 ? currentRound - 1 : 1);
         }
     });
+    
+    // Host requests ready roll-call before starting (self-healing mechanism)
+    roomChannel.on('broadcast', { event: 'request_ready_roll_call' }, async (response) => {
+        const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) return;
+        // Force-broadcast our current ready state
+        await broadcastReadyState(true);
+    });
 
     // 3. Subscribe
     roomChannel.subscribe(async (status) => {
@@ -2220,8 +2302,11 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             setTimeout(async () => {
                 if (channel === roomChannel) {
                     await syncMyState();
-                    // Broadcast initial ready state
-                    await broadcastReadyState();
+                    // Force-broadcast initial ready state (bypass dedup for fresh joins)
+                    clearReadyStateDedup();
+                    await broadcastReadyState(true);
+                    // Start periodic ready refresh for self-healing
+                    startReadyRefresh();
                 }
             }, 100);
             
@@ -2293,6 +2378,34 @@ function makeStartId() {
 
 async function startGameAsHost() {
     if (isPlaying || !roomChannel) return;
+    
+    // Request fresh ready states from all clients before starting
+    // This ensures we have the latest ready states after any disconnects/reconnects
+    try {
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'request_ready_roll_call',
+            payload: hostPayload({})
+        });
+        // Brief wait for responses
+        await new Promise(resolve => setTimeout(resolve, 200));
+    } catch (e) {
+        console.warn('Failed to request ready roll-call:', e);
+    }
+    
+    // Final check: verify all players are still ready before starting
+    // This prevents starting with late joiners who haven't clicked Ready
+    if (!getAllPlayersReady(activePlayersList)) {
+        console.warn('startGameAsHost aborted: not all players ready');
+        return;
+    }
+    
+    // Double-check we're not already playing (might have changed during await)
+    if (isPlaying) return;
+    
+    // Stop ready refresh while playing
+    stopReadyRefresh();
+    
     isPlaying = true;
     appliedStartId = makeStartId();
     hostSubmissions = {};
@@ -2648,6 +2761,7 @@ async function leaveRoomAndGoHome() {
     clearInterval(penaltyInterval);
     penaltyInterval = null;
     penaltyActive = false;
+    stopReadyRefresh();
     clearTimeout(finalizeWatchdog);
     finalizeWatchdog = null;
     clearTimeout(roomProbeTimer);
