@@ -983,27 +983,73 @@ const connectionRecovery = WordperfectConnectionRecovery.create({
                 ? 'Rejoin failed. Check your connection and try again.'
                 : undefined
         );
+        if (!reconnectManager.isActive() && roomChannel && !intentionallyClosedChannels.has(roomChannel)) {
+            reconnectManager.start();
+        }
     },
     onRecovered() {
         dismissConnectionLoss();
+        reconnectManager.success();
     }
 });
+
+const reconnectManager = WordperfectConnectionRecovery.createReconnectManager({
+    onReconnect(attempt) {
+        console.log('Attempting reconnection, attempt:', attempt);
+        if (!myRoomCode || !myPlayerName) {
+            return Promise.reject(new Error('No room to rejoin'));
+        }
+        return attemptChannelReconnect();
+    },
+    onGiveUp() {
+        console.warn('Reconnection attempts exhausted');
+        showConnectionError('Could not reconnect. Please refresh the page.');
+    }
+});
+
+async function attemptChannelReconnect() {
+    if (!roomChannel || intentionallyClosedChannels.has(roomChannel)) {
+        throw new Error('Channel intentionally closed');
+    }
+    const channel = roomChannel;
+    try {
+        await channel.unsubscribe();
+    } catch (e) {
+        console.warn('Error unsubscribing during reconnect:', e);
+    }
+    return new Promise((resolve, reject) => {
+        channel.subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+                reconnectManager.success();
+                resolve();
+            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                reject(new Error('Reconnect subscribe failed: ' + status));
+            }
+        });
+    });
+}
 
 document.addEventListener('visibilitychange', () => {
     connectionRecovery.handleVisibility();
 });
 
+let hostElectionGrace = null;
+function initHostElectionGrace() {
+    hostElectionGrace = WordperfectPresenceSync.createHostElectionGrace({
+        onElect() {
+            performHostElection();
+        }
+    });
+}
+initHostElectionGrace();
 
-const submitPresence = WordperfectPresenceSync.createLatest((payload) => {
+
+const throttledPresence = WordperfectPresenceSync.createThrottled((payload) => {
     if (!roomChannel) return;
     return roomChannel.track(payload);
 });
 
-async function syncMyState() {
-    if (!roomChannel) return;
-
-    console.log("Broadcasting my state: Ready =", isReady);
-
+function buildTrackPayload() {
     const trackPayload = {
         id: myPlayerId,
         name: myPlayerName,
@@ -1026,11 +1072,44 @@ async function syncMyState() {
         trackPayload.disconnectedSeats = disconnectedSeats;
         trackPayload.hostGeneration = hostGeneration;
     }
-
-    await submitPresence(trackPayload);
+    return trackPayload;
 }
 
-async function maybeElectNewHost() {
+async function syncMyState() {
+    if (!roomChannel) return;
+
+    console.log("Broadcasting my state: Ready =", isReady);
+    await throttledPresence.submit(buildTrackPayload());
+}
+
+async function syncMyStateImmediate() {
+    if (!roomChannel) return;
+    await throttledPresence.flush();
+    await roomChannel.track(buildTrackPayload());
+}
+
+function maybeElectNewHost() {
+    if (!roomChannel || hostElectionInProgress) return;
+
+    const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
+    if (realPlayers.length === 0) return;
+    
+    const hasLiveHost = realPlayers.some(p => p.isHost);
+    if (hasLiveHost) {
+        if (hostElectionGrace) hostElectionGrace.hostReturned();
+        return;
+    }
+
+    const electedId = [...realPlayers]
+        .map(p => p.id)
+        .sort((a, b) => String(a).localeCompare(String(b)))[0];
+    
+    if (hostElectionGrace) {
+        hostElectionGrace.handlePresenceChange(hasLiveHost, myPlayerId, electedId);
+    }
+}
+
+async function performHostElection() {
     if (!roomChannel || hostElectionInProgress) return;
 
     const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
@@ -1180,13 +1259,23 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         const anotherHost = livePresencePlayers.find(
             player => player.isHost && !player.isAi && player.id !== myPlayerId
         );
-        if (isHost && recoveringAsFormerHost && anotherHost) {
-            isHost = false;
-            disconnectedSeats = [];
-            sessionStorage.setItem('wordperfect_is_host', 'false');
-            const myLiveState = livePresencePlayers.find(player => player.id === myPlayerId);
-            if (myLiveState) myLiveState.isHost = false;
-            syncMyState();
+        if (isHost && anotherHost) {
+            const shouldDemote = recoveringAsFormerHost ||
+                (anotherHost.hostGeneration != null && hostGeneration != null &&
+                 Number(anotherHost.hostGeneration) > Number(hostGeneration)) ||
+                String(anotherHost.id).localeCompare(String(myPlayerId)) < 0;
+            
+            if (shouldDemote) {
+                console.log('Demoting self as host - another host present:', anotherHost.id);
+                isHost = false;
+                recoveringAsFormerHost = false;
+                disconnectedSeats = [];
+                if (hostElectionGrace) hostElectionGrace.reset();
+                sessionStorage.setItem('wordperfect_is_host', 'false');
+                const myLiveState = livePresencePlayers.find(player => player.id === myPlayerId);
+                if (myLiveState) myLiveState.isHost = false;
+                syncMyState();
+            }
         }
         const liveIds = new Set(livePresencePlayers.map(player => player.id));
         const departed = previousLivePlayers.filter(
@@ -1455,21 +1544,29 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     // Listen for request_sync (Host responds to rejoining clients)
     roomChannel.on('broadcast', { event: 'request_sync' }, async (response) => {
         const data = getBroadcastData(response);
-        if (isHost && isPlaying) {
-            console.log("Host received request_sync from requester:", data.requesterId);
-            await roomChannel.send({
-                type: 'broadcast',
-                event: 'sync_game_state',
-                payload: hostPayload({
-                    board: boardLetters,
-                    currentRound: currentRound,
-                    maxRounds: maxRounds,
-                    roundTime: secondsPerRound,
-                    scoreMode: scoreMode,
-                    timeLeft: timeLeft
-                })
-            });
-        }
+        if (!isHost) return;
+        
+        console.log("Host received request_sync from requester:", data.requesterId);
+        
+        const phase = isPlaying ? 'playing' : 
+                      screenResults.classList.contains('active') ? 'results' :
+                      screenStandings.classList.contains('active') ? 'standings' :
+                      screenWinner.classList.contains('active') ? 'winner' : 'lobby';
+        
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'sync_game_state',
+            payload: hostPayload({
+                board: boardLetters,
+                currentRound: currentRound,
+                maxRounds: maxRounds,
+                roundTime: secondsPerRound,
+                scoreMode: scoreMode,
+                timeLeft: isPlaying ? timeLeft : secondsPerRound,
+                phase: phase,
+                roundSubmitted: roundSubmitted
+            })
+        });
     });
 
     // Host (or newly elected host) asks locked-in clients to resend their drafts
@@ -1493,41 +1590,72 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             console.warn('Ignoring sync_game_state from non-host');
             return;
         }
-        if (!isHost) {
-            if (roundSubmitted) return;
+        if (isHost) return;
+        
+        const incomingRound = Number(data.currentRound) || 1;
+        const hostPhase = data.phase || 'playing';
+        
+        if (incomingRound < currentRound) {
+            console.warn('Ignoring sync_game_state for older round:', incomingRound, 'vs', currentRound);
+            return;
+        }
+        
+        if (roundSubmitted && incomingRound === currentRound && hostPhase === 'playing') {
+            return;
+        }
 
-            console.log("Received sync_game_state from host:", data);
-            
-            // Sync game parameters
-            boardLetters = data.board;
-            currentRound = data.currentRound;
-            maxRounds = data.maxRounds;
-            secondsPerRound = data.roundTime || 60;
-            scoreMode = data.scoreMode || 'classic';
-            setModeToggleUI(scoreMode);
-            cachedBoardWords = null;
-            cachedBoardKey = '';
-
-            const syncedLeft = typeof data.timeLeft === 'number' ? data.timeLeft : secondsPerRound;
-
-            sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
+        console.log("Received sync_game_state from host:", data, "phase:", hostPhase);
+        
+        maxRounds = data.maxRounds;
+        secondsPerRound = data.roundTime || 60;
+        scoreMode = data.scoreMode || 'classic';
+        setModeToggleUI(scoreMode);
+        
+        sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
+        sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
+        sessionStorage.setItem('wordperfect_score_mode', scoreMode);
+        
+        if (hostPhase === 'lobby') {
+            currentRound = incomingRound;
             sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
-            sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
-            sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
-            sessionStorage.setItem('wordperfect_score_mode', scoreMode);
-            sessionStorage.setItem('wordperfect_is_playing', 'true');
-            sessionStorage.setItem('wordperfect_time_left', String(syncedLeft));
-
-            if (WordperfectRoundSync.shouldEnterRoundFromSync(isPlaying, roundSubmitted)) {
-                hideOverlay(screenLobby);
-                hideOverlay(screenStandings);
+            sessionStorage.removeItem('wordperfect_is_playing');
+            updateLobbyRoundText();
+            if (!screenLobby.classList.contains('active')) {
                 hideOverlay(screenResults);
-                updateLobbyRoundText();
-                initRound(syncedLeft);
-            } else if (WordperfectRoundSync.shouldAdoptHostTime(clockPausedByConnection, isPlaying)) {
-                timeLeft = syncedLeft;
-                resumeRoundClock();
+                hideOverlay(screenStandings);
+                hideOverlay(screenWinner);
+                showOverlay(screenLobby);
             }
+            return;
+        }
+        
+        if (hostPhase === 'results' || hostPhase === 'standings' || hostPhase === 'winner') {
+            currentRound = incomingRound;
+            sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
+            return;
+        }
+        
+        boardLetters = data.board;
+        currentRound = incomingRound;
+        cachedBoardWords = null;
+        cachedBoardKey = '';
+
+        const syncedLeft = typeof data.timeLeft === 'number' ? data.timeLeft : secondsPerRound;
+
+        sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
+        sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
+        sessionStorage.setItem('wordperfect_is_playing', 'true');
+        sessionStorage.setItem('wordperfect_time_left', String(syncedLeft));
+
+        if (WordperfectRoundSync.shouldEnterRoundFromSync(isPlaying, roundSubmitted)) {
+            hideOverlay(screenLobby);
+            hideOverlay(screenStandings);
+            hideOverlay(screenResults);
+            updateLobbyRoundText();
+            initRound(syncedLeft);
+        } else if (WordperfectRoundSync.shouldAdoptHostTime(clockPausedByConnection, isPlaying)) {
+            timeLeft = syncedLeft;
+            resumeRoundClock();
         }
     });
 

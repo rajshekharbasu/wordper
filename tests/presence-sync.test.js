@@ -167,6 +167,234 @@ test('a new round still starts when it draws the same letters', () => {
     }), false);
 });
 
+// --- THROTTLED PRESENCE TESTS (BUG 1 FIX) ---
+
+function createFakeClock() {
+    let now = 0;
+    let nextId = 1;
+    const timers = new Map();
+
+    return {
+        now: () => now,
+        setTimeout(fn, ms) {
+            const id = nextId++;
+            timers.set(id, { fn, at: now + ms });
+            return id;
+        },
+        clearTimeout(id) {
+            timers.delete(id);
+        },
+        advance(ms) {
+            const target = now + ms;
+            while (true) {
+                let next = null;
+                for (const [id, t] of timers) {
+                    if (t.at <= target && (!next || t.at < next.at || (t.at === next.at && id < next.id))) {
+                        next = { id, fn: t.fn, at: t.at };
+                    }
+                }
+                if (!next) {
+                    now = target;
+                    return;
+                }
+                now = next.at;
+                timers.delete(next.id);
+                next.fn();
+            }
+        }
+    };
+}
+
+test('createThrottled limits presence tracks to one per throttle window', async () => {
+    const clock = createFakeClock();
+    const tracked = [];
+    const throttled = sync.createThrottled(
+        (payload) => {
+            tracked.push({ payload, at: clock.now() });
+            return Promise.resolve();
+        },
+        {
+            throttleMs: 1000,
+            setTimeout: clock.setTimeout,
+            clearTimeout: clock.clearTimeout,
+            now: clock.now
+        }
+    );
+
+    throttled.submit({ ready: false, rounds: 3 });
+    throttled.submit({ ready: false, rounds: 5 });
+    throttled.submit({ ready: true, rounds: 5 });
+    
+    await Promise.resolve();
+    
+    assert.strictEqual(tracked.length, 1, 'only one immediate track should fire');
+    assert.deepStrictEqual(tracked[0].payload, { ready: false, rounds: 3 });
+    
+    clock.advance(1000);
+    await Promise.resolve();
+    
+    assert.strictEqual(tracked.length, 2, 'trailing track should fire after throttle window');
+    assert.deepStrictEqual(tracked[1].payload, { ready: true, rounds: 5 });
+});
+
+test('createThrottled sends immediately when outside throttle window', async () => {
+    const clock = createFakeClock();
+    const tracked = [];
+    const throttled = sync.createThrottled(
+        (payload) => {
+            tracked.push({ payload, at: clock.now() });
+            return Promise.resolve();
+        },
+        {
+            throttleMs: 1000,
+            setTimeout: clock.setTimeout,
+            clearTimeout: clock.clearTimeout,
+            now: clock.now
+        }
+    );
+
+    throttled.submit({ rounds: 3 });
+    await Promise.resolve();
+    assert.strictEqual(tracked.length, 1);
+    
+    clock.advance(1500);
+    
+    throttled.submit({ rounds: 5 });
+    await Promise.resolve();
+    assert.strictEqual(tracked.length, 2, 'should send immediately after throttle window');
+    assert.strictEqual(tracked[1].at, 1500);
+});
+
+test('createThrottled flush sends pending payload immediately', async () => {
+    const clock = createFakeClock();
+    const tracked = [];
+    const throttled = sync.createThrottled(
+        (payload) => {
+            tracked.push({ payload, at: clock.now() });
+            return Promise.resolve();
+        },
+        {
+            throttleMs: 1000,
+            setTimeout: clock.setTimeout,
+            clearTimeout: clock.clearTimeout,
+            now: clock.now
+        }
+    );
+
+    throttled.submit({ rounds: 3 });
+    await Promise.resolve();
+    throttled.submit({ rounds: 5, urgent: true });
+    
+    assert.strictEqual(tracked.length, 1);
+    assert.strictEqual(throttled.hasPending(), true);
+    
+    await throttled.flush();
+    
+    assert.strictEqual(tracked.length, 2, 'flush should send pending payload');
+    assert.deepStrictEqual(tracked[1].payload, { rounds: 5, urgent: true });
+    assert.strictEqual(throttled.hasPending(), false);
+});
+
+test('createThrottled cancel discards pending without sending', async () => {
+    const clock = createFakeClock();
+    const tracked = [];
+    const throttled = sync.createThrottled(
+        (payload) => {
+            tracked.push(payload);
+            return Promise.resolve();
+        },
+        {
+            throttleMs: 1000,
+            setTimeout: clock.setTimeout,
+            clearTimeout: clock.clearTimeout,
+            now: clock.now
+        }
+    );
+
+    throttled.submit({ rounds: 3 });
+    await Promise.resolve();
+    throttled.submit({ rounds: 5 });
+    throttled.cancel();
+    
+    clock.advance(2000);
+    await Promise.resolve();
+    
+    assert.strictEqual(tracked.length, 1, 'cancel should prevent pending track');
+});
+
+// --- HOST ELECTION GRACE PERIOD TESTS (BUG 2 FIX) ---
+
+test('createHostElectionGrace waits before electing new host', () => {
+    const clock = createFakeClock();
+    let elected = false;
+    const grace = sync.createHostElectionGrace({
+        graceMs: 3000,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onElect: () => { elected = true; }
+    });
+
+    grace.handlePresenceChange(false, 'me', 'me');
+    
+    clock.advance(2999);
+    assert.strictEqual(elected, false, 'should not elect before grace period');
+    
+    clock.advance(1);
+    assert.strictEqual(elected, true, 'should elect after grace period');
+});
+
+test('createHostElectionGrace cancels election if host returns', () => {
+    const clock = createFakeClock();
+    let elected = false;
+    const grace = sync.createHostElectionGrace({
+        graceMs: 3000,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onElect: () => { elected = true; }
+    });
+
+    grace.handlePresenceChange(false, 'me', 'me');
+    clock.advance(1500);
+    
+    grace.hostReturned();
+    
+    clock.advance(5000);
+    assert.strictEqual(elected, false, 'host return should cancel pending election');
+});
+
+test('createHostElectionGrace does not elect if not the chosen one', () => {
+    const clock = createFakeClock();
+    let elected = false;
+    const grace = sync.createHostElectionGrace({
+        graceMs: 3000,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onElect: () => { elected = true; }
+    });
+
+    grace.handlePresenceChange(false, 'me', 'someone-else');
+    
+    clock.advance(5000);
+    assert.strictEqual(elected, false, 'should not elect if not the elected id');
+});
+
+test('createHostElectionGrace does not start when host is live', () => {
+    const clock = createFakeClock();
+    let elected = false;
+    const grace = sync.createHostElectionGrace({
+        graceMs: 3000,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onElect: () => { elected = true; }
+    });
+
+    grace.handlePresenceChange(true, 'me', 'me');
+    
+    clock.advance(5000);
+    assert.strictEqual(elected, false, 'should not start election when host is live');
+    assert.strictEqual(grace.isPending(), false);
+});
+
 (async function main() {
     let failed = 0;
     for (const t of tests) {

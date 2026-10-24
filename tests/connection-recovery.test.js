@@ -249,6 +249,151 @@ test('the default grace waits out a Supabase reconnect instead of firing at 3 se
     assert.deepStrictEqual(lost, [15000]);
 });
 
+// --- RECONNECT MANAGER TESTS (BUG 1b FIX) ---
+
+const { createReconnectManager } = require('../public/connection-recovery.js');
+
+test('createReconnectManager attempts reconnection with exponential backoff', async () => {
+    const clock = createFakeClock();
+    const attempts = [];
+    const manager = createReconnectManager({
+        delays: [1000, 2000, 4000],
+        maxAttempts: 3,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onReconnect(attempt) {
+            attempts.push({ attempt, at: clock.now() });
+            return Promise.reject(new Error('failed'));
+        }
+    });
+
+    manager.start();
+    
+    clock.advance(1000);
+    await Promise.resolve();
+    assert.strictEqual(attempts.length, 1);
+    assert.strictEqual(attempts[0].at, 1000);
+    
+    await Promise.resolve();
+    clock.advance(2000);
+    await Promise.resolve();
+    assert.strictEqual(attempts.length, 2);
+    assert.strictEqual(attempts[1].at, 3000);
+    
+    await Promise.resolve();
+    clock.advance(4000);
+    await Promise.resolve();
+    assert.strictEqual(attempts.length, 3);
+    assert.strictEqual(attempts[2].at, 7000);
+});
+
+test('createReconnectManager stops on success', async () => {
+    const clock = createFakeClock();
+    const attempts = [];
+    const manager = createReconnectManager({
+        delays: [1000, 2000],
+        maxAttempts: 5,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onReconnect(attempt) {
+            attempts.push(attempt);
+            if (attempt === 2) {
+                manager.success();
+                return Promise.resolve();
+            }
+            return Promise.reject(new Error('failed'));
+        }
+    });
+
+    manager.start();
+    clock.advance(1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    clock.advance(2000);
+    await Promise.resolve();
+    
+    assert.strictEqual(attempts.length, 2);
+    assert.strictEqual(manager.isActive(), false);
+    
+    clock.advance(10000);
+    await Promise.resolve();
+    assert.strictEqual(attempts.length, 2, 'should not attempt after success');
+});
+
+test('createReconnectManager calls onGiveUp after max attempts', async () => {
+    const clock = createFakeClock();
+    let gaveUp = false;
+    const manager = createReconnectManager({
+        delays: [100],
+        maxAttempts: 2,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onReconnect() {
+            return Promise.reject(new Error('failed'));
+        },
+        onGiveUp() {
+            gaveUp = true;
+        }
+    });
+
+    manager.start();
+    clock.advance(100);
+    await Promise.resolve();
+    await Promise.resolve();
+    clock.advance(100);
+    await Promise.resolve();
+    await Promise.resolve();
+    
+    assert.strictEqual(gaveUp, true);
+    assert.strictEqual(manager.isActive(), false);
+});
+
+test('createReconnectManager stop cancels pending attempts', () => {
+    const clock = createFakeClock();
+    const attempts = [];
+    const manager = createReconnectManager({
+        delays: [1000],
+        maxAttempts: 5,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onReconnect(attempt) {
+            attempts.push(attempt);
+            return Promise.reject(new Error('failed'));
+        }
+    });
+
+    manager.start();
+    clock.advance(500);
+    manager.stop();
+    clock.advance(5000);
+    
+    assert.strictEqual(attempts.length, 0, 'stop should prevent all attempts');
+    assert.strictEqual(manager.isActive(), false);
+});
+
+test('createReconnectManager reset clears state', () => {
+    const clock = createFakeClock();
+    const attempts = [];
+    const manager = createReconnectManager({
+        delays: [1000],
+        maxAttempts: 5,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
+        onReconnect(attempt) {
+            attempts.push(attempt);
+            return Promise.reject(new Error('failed'));
+        }
+    });
+
+    manager.start();
+    clock.advance(1000);
+    assert.strictEqual(manager.getAttempt(), 1);
+    
+    manager.reset();
+    assert.strictEqual(manager.getAttempt(), 0);
+    assert.strictEqual(manager.isActive(), false);
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
     try {
