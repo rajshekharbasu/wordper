@@ -97,12 +97,14 @@ function getAllPlayersReady(players) {
     return readyPlayers.every(p => getPlayerReadyState(p.id));
 }
 
-function canAutoStartLobby() {
+function canAutoStartGame() {
     if (!isHost) return false;
     if (isPlaying) return false;
     if (!isReady) return false;
     if (suppressAutoStart) return false;
-    if (!screenLobby.classList.contains('active')) return false;
+    const onLobby = screenLobby.classList.contains('active');
+    const onStandings = screenStandings.classList.contains('active');
+    if (!onLobby && !onStandings) return false;
     return getAllPlayersReady(activePlayersList);
 }
 let lastKnownHostId = null;
@@ -990,6 +992,15 @@ function dropPausedClock() {
     timerInterval = null;
 }
 
+function pauseRoundClock() {
+    if (timerInterval != null) {
+        console.log('Pausing round clock, timeLeft:', timeLeft);
+        clockPausedByConnection = true;
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
+}
+
 function noteRoomContact() {
     connectionRecovery.noteContact();
 }
@@ -1327,9 +1338,22 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         suppressAutoStart = true;
         // Clear broadcast ready states on recovery - we need fresh data from peers
         broadcastReadyStates = Object.create(null);
-        // Clear suppression after a grace period to allow normal operation
+        // Clear suppression after a longer grace period, but only if still on lobby
+        // (report_phase and sync_game_state handlers will clear it sooner when appropriate)
         setTimeout(() => {
-            suppressAutoStart = false;
+            // Only auto-clear if we're on lobby and haven't navigated elsewhere
+            // This prevents starting alone if peers didn't respond
+            if (suppressAutoStart && screenLobby.classList.contains('active')) {
+                const peerCount = activePlayersList.filter(p => p.id !== myPlayerId && !p.isAi && !p.isDisconnected).length;
+                if (peerCount === 0) {
+                    // No peers, safe to clear suppression
+                    suppressAutoStart = false;
+                } else {
+                    console.warn('suppressAutoStart timeout but peers present - staying suppressed');
+                    // Peers exist but we haven't heard from them - keep suppressed
+                    // They might be on a different screen
+                }
+            }
         }, 5000);
     }
     
@@ -1439,7 +1463,15 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         // A pending guest is only probing the room. It becomes visible after lobby
         // validation, or after the host grants a disconnected-seat claim.
         const visibleLivePlayers = livePresencePlayers.filter(player => !player.isPendingJoin);
-        activePlayersList = [...visibleLivePlayers, ...aiPlayersToAppend, ...seatsForRoster];
+        
+        // Filter out disconnected seats that have a matching live player (prevents duplicates)
+        const livePlayerIds = new Set(visibleLivePlayers.map(p => p.id));
+        const aiPlayerIds = new Set(aiPlayersToAppend.map(p => p.id));
+        const deduplicatedSeats = seatsForRoster.filter(seat => 
+            !livePlayerIds.has(seat.id) && !aiPlayerIds.has(seat.id)
+        );
+        
+        activePlayersList = [...visibleLivePlayers, ...aiPlayersToAppend, ...deduplicatedSeats];
         if (isHost && (departedChanged || reclaimedChanged)) syncMyState();
 
         // Cache bots whenever we see them — host leave removes them from presence, but
@@ -1503,7 +1535,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             renderStandingsScreen(getPlayersWithScores(activePlayersList), currentRound > 1 ? currentRound - 1 : 1);
         }
 
-        if (!suppressAutoStart && canAutoStartLobby()) {
+        if (!suppressAutoStart && canAutoStartGame()) {
             console.log("Host detected all players are ready. Starting game...");
             startGameAsHost();
         }
@@ -1677,32 +1709,52 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         startCountdown();
     });
 
-    // Listen for request_sync (Host responds to rejoining clients)
+    // Listen for request_sync (Host responds to rejoining clients, all clients report phase)
     roomChannel.on('broadcast', { event: 'request_sync' }, async (response) => {
         const data = getBroadcastData(response);
-        if (!isHost) return;
-        
-        console.log("Host received request_sync from requester:", data.requesterId);
+        if (data.requesterId === myPlayerId) return; // Don't respond to self
         
         const phase = isPlaying ? 'playing' : 
                       screenResults.classList.contains('active') ? 'results' :
                       screenStandings.classList.contains('active') ? 'standings' :
                       screenWinner.classList.contains('active') ? 'winner' : 'lobby';
         
+        // All clients report their phase so recovering hosts can adopt peer phase
         await roomChannel.send({
             type: 'broadcast',
-            event: 'sync_game_state',
-            payload: hostPayload({
-                board: boardLetters,
-                currentRound: currentRound,
-                maxRounds: maxRounds,
-                roundTime: secondsPerRound,
-                scoreMode: scoreMode,
-                timeLeft: isPlaying ? timeLeft : secondsPerRound,
+            event: 'report_phase',
+            payload: { 
+                playerId: myPlayerId, 
                 phase: phase,
-                roundSubmitted: roundSubmitted
-            })
+                currentRound: currentRound,
+                isReady: isReady
+            }
         });
+        
+        // Host also sends full sync_game_state
+        if (isHost) {
+            console.log("Host received request_sync from requester:", data.requesterId);
+            
+            await roomChannel.send({
+                type: 'broadcast',
+                event: 'sync_game_state',
+                payload: hostPayload({
+                    board: boardLetters,
+                    currentRound: currentRound,
+                    maxRounds: maxRounds,
+                    roundTime: secondsPerRound,
+                    scoreMode: scoreMode,
+                    timeLeft: isPlaying ? timeLeft : secondsPerRound,
+                    phase: phase,
+                    roundSubmitted: roundSubmitted,
+                    readyStates: Object.fromEntries(
+                        activePlayersList
+                            .filter(p => !p.isAi && !p.isDisconnected)
+                            .map(p => [p.id, getPlayerReadyState(p.id)])
+                    )
+                })
+            });
+        }
     });
 
     // Host (or newly elected host) asks locked-in clients to resend their drafts
@@ -1716,6 +1768,59 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 event: 'submit_words',
                 payload: { playerId: myPlayerId, words: draftedWords }
             });
+        }
+    });
+
+    // Listen for report_phase (all clients report their phase; recovering hosts adopt peer phase)
+    roomChannel.on('broadcast', { event: 'report_phase' }, (response) => {
+        const data = getBroadcastData(response);
+        if (!data.playerId || data.playerId === myPlayerId) return;
+        
+        // Update ready state from peer
+        if (data.isReady !== undefined) {
+            broadcastReadyStates[data.playerId] = {
+                isReady: !!data.isReady,
+                updatedAt: Date.now()
+            };
+        }
+        
+        // Recovering host adopts peer phase if they're ahead
+        if (isHost && recoveringAsFormerHost && suppressAutoStart) {
+            const peerPhase = data.phase || 'lobby';
+            const peerRound = Number(data.currentRound) || 1;
+            
+            console.log("Recovering host received phase report:", peerPhase, "round:", peerRound);
+            
+            // If peer is not in lobby, adopt their phase
+            if (peerPhase !== 'lobby') {
+                console.log("Adopting peer phase:", peerPhase, "round:", peerRound);
+                currentRound = peerRound;
+                sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
+                
+                // Navigate to correct screen
+                hideOverlay(screenLobby);
+                if (peerPhase === 'results') {
+                    showOverlay(screenResults);
+                    recoveringAsFormerHost = false;
+                    suppressAutoStart = false;
+                } else if (peerPhase === 'standings') {
+                    showOverlay(screenStandings);
+                    renderStandingsScreen(getPlayersWithScores(activePlayersList), peerRound > 1 ? peerRound - 1 : 1);
+                    recoveringAsFormerHost = false;
+                    suppressAutoStart = false;
+                } else if (peerPhase === 'winner') {
+                    showOverlay(screenWinner);
+                    recoveringAsFormerHost = false;
+                    suppressAutoStart = false;
+                } else if (peerPhase === 'playing') {
+                    // Peer is playing but we just joined - stay suppressed
+                    console.log("Peer is playing, staying suppressed");
+                }
+            } else {
+                // Peer is also in lobby - safe to clear suppression
+                recoveringAsFormerHost = false;
+                suppressAutoStart = false;
+            }
         }
     });
 
@@ -1760,6 +1865,18 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         
         // Clear auto-start suppression after receiving valid sync
         suppressAutoStart = false;
+        
+        // Restore ready states from host (for late joiners/reconnecters)
+        if (data.readyStates && typeof data.readyStates === 'object') {
+            for (const [playerId, readyState] of Object.entries(data.readyStates)) {
+                if (playerId !== myPlayerId) {
+                    broadcastReadyStates[playerId] = {
+                        isReady: !!readyState,
+                        updatedAt: Date.now()
+                    };
+                }
+            }
+        }
         
         maxRounds = data.maxRounds;
         secondsPerRound = data.roundTime || 60;
@@ -2056,13 +2173,15 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             updatedAt: Date.now()
         };
         // Check if we should start the game now that ready states changed
-        if (!suppressAutoStart && canAutoStartLobby()) {
+        if (!suppressAutoStart && canAutoStartGame()) {
             console.log("Host detected all players are ready via broadcast. Starting game...");
             startGameAsHost();
         }
-        // Re-render lobby to show ready indicators
+        // Re-render to show ready indicators
         if (screenLobby.classList.contains('active')) {
             renderLobbyPlayers(getPlayersWithScores(activePlayersList));
+        } else if (screenStandings.classList.contains('active')) {
+            renderStandingsScreen(getPlayersWithScores(activePlayersList), currentRound > 1 ? currentRound - 1 : 1);
         }
     });
 
@@ -2718,7 +2837,7 @@ async function toggleReady(button, idleLabel) {
     // Broadcast ready state change (much lighter than presence track)
     await broadcastReadyState();
     
-    if (canAutoStartLobby()) {
+    if (canAutoStartGame()) {
         await startGameAsHost();
         return;
     }

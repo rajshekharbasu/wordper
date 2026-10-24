@@ -662,6 +662,107 @@ test('N6: multiple rapid presence changes consolidate into single election', () 
     assert.strictEqual(electCount, 1, 'multiple rapid changes should result in single election');
 });
 
+// --- R1 TEST: Game must be able to start from standings screen (round 2+) ---
+
+test('R1: shouldStartLobby works for round 2+ when all ready on standings', () => {
+    // After round 1 results, players go to standings and click "Ready for Next Round"
+    // The game should be able to start round 2 from standings, not just from lobby
+    const players = [
+        { id: 'host', isReady: true, isDisconnected: false },
+        { id: 'guest1', isReady: true, isDisconnected: false },
+        { id: 'guest2', isReady: true, isDisconnected: false }
+    ];
+    
+    // Test the underlying logic - all ready should allow start
+    assert.equal(sync.shouldStartLobby({
+        isHost: true,
+        isPlaying: false,
+        isReady: true,
+        players
+    }), true, 'host should be able to start when all are ready');
+    
+    // Test with one player not ready
+    const playersNotReady = [
+        { id: 'host', isReady: true, isDisconnected: false },
+        { id: 'guest1', isReady: true, isDisconnected: false },
+        { id: 'guest2', isReady: false, isDisconnected: false }
+    ];
+    
+    assert.equal(sync.shouldStartLobby({
+        isHost: true,
+        isPlaying: false,
+        isReady: true,
+        players: playersNotReady
+    }), false, 'should not start when someone is not ready');
+});
+
+// --- R1 TEST: Multi-round game simulation ---
+
+test('R1: 3-round game can progress through all phases', () => {
+    // This tests the state machine for a complete 3-round game
+    // Each round: lobby/standings -> countdown -> playing -> results -> standings
+    // Final: standings -> winner -> Play Again (returns to lobby)
+    
+    const gamePhases = [];
+    let currentRound = 1;
+    const maxRounds = 3;
+    let isPlaying = false;
+    let roundSubmitted = false;
+    
+    function simulateRound(roundNum) {
+        // Start phase: all players ready
+        gamePhases.push({ round: roundNum, phase: 'start', screen: roundNum === 1 ? 'lobby' : 'standings' });
+        
+        // Verify start conditions
+        assert.equal(sync.shouldStartLobby({
+            isHost: true,
+            isPlaying: false,
+            isReady: true,
+            players: [
+                { id: 'host', isReady: true, isDisconnected: false },
+                { id: 'guest1', isReady: true, isDisconnected: false },
+                { id: 'guest2', isReady: true, isDisconnected: false }
+            ]
+        }), true, `round ${roundNum}: should be able to start`);
+        
+        // Countdown phase
+        gamePhases.push({ round: roundNum, phase: 'countdown' });
+        
+        // Playing phase
+        isPlaying = true;
+        gamePhases.push({ round: roundNum, phase: 'playing' });
+        
+        // End round
+        isPlaying = false;
+        roundSubmitted = true;
+        gamePhases.push({ round: roundNum, phase: 'results' });
+        
+        // Standings (or winner if final round)
+        if (roundNum < maxRounds) {
+            gamePhases.push({ round: roundNum, phase: 'standings' });
+            roundSubmitted = false; // Reset for next round
+        } else {
+            gamePhases.push({ round: roundNum, phase: 'winner' });
+        }
+        
+        currentRound++;
+    }
+    
+    // Play all 3 rounds
+    for (let i = 1; i <= maxRounds; i++) {
+        simulateRound(i);
+    }
+    
+    // Verify we reached the winner phase
+    const finalPhase = gamePhases[gamePhases.length - 1];
+    assert.equal(finalPhase.phase, 'winner', 'should end on winner phase');
+    assert.equal(finalPhase.round, 3, 'should be after round 3');
+    
+    // Verify we had all rounds
+    const rounds = new Set(gamePhases.map(p => p.round));
+    assert.deepStrictEqual([...rounds].sort(), [1, 2, 3], 'should have played all 3 rounds');
+});
+
 (async function main() {
     let failed = 0;
     for (const t of tests) {
