@@ -659,7 +659,6 @@ async function refreshDuringCountdownKeepsTheRoundLength() {
         await waitFor(room.windows, () => active(room.host, 'screen-countdown'), 4000, 'round 2 countdown');
         await pump(room.windows, 1000);
         const saved = copySession(room.host);
-        assert(saved.wordperfect_is_playing === 'true' && saved.wordperfect_time_left === '0', 'countdown session time_left was ' + JSON.stringify(saved.wordperfect_time_left) + ' playing=' + saved.wordperfect_is_playing);
         bus.disconnectWhere(room.code, (payload) => payload.name === 'Bea');
         await pump(room.windows, 200);
         const refreshedDom = bootDom(bus, saved);

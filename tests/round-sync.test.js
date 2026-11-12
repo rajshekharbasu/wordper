@@ -44,4 +44,12 @@ assert.equal(sync.shouldResubmitDraft(false, false), true, 'a locked round still
 assert.equal(sync.shouldResubmitDraft(false, true), false, 'a round that already has results is not resent');
 assert.equal(sync.shouldResubmitDraft(true, false), false, 'a live round is not resent');
 
+assert.equal(sync.graceUntilRoundEnd(100000, 80000, 10000), 30000, 'early lock-in waits for the rest of the round plus grace');
+assert.equal(sync.graceUntilRoundEnd(100000, 100000, 10000), 10000, 'a clock that already ended keeps the grace');
+assert.equal(sync.graceUntilRoundEnd(100000, 130000, 10000), 10000, 'a deadline already past does not go negative');
+assert.equal(sync.graceUntilRoundEnd(null, 100000, 10000), 10000, 'a missing deadline falls back to the grace');
+assert.equal(sync.roundStartTimeLeft(60), 60, 'a new round stores its full length');
+assert.equal(sync.roundStartTimeLeft(0), 60, 'a zero clock is not a round length');
+assert.equal(sync.roundStartTimeLeft(undefined), 60, 'a missing length falls back to 60');
+
 console.log('ok round sync decisions');

@@ -156,6 +156,37 @@
         return bag;
     }
 
+    // A host-filled draft is a placeholder. The player's own later list replaces it.
+    function rememberHostFilledSubmission(submissions, filledIds, playerId, words) {
+        const bag = submissions && typeof submissions === 'object' ? submissions : Object.create(null);
+        if (playerId == null || playerId === '') return false;
+        if (Object.prototype.hasOwnProperty.call(bag, playerId)) return false;
+        bag[playerId] = words;
+        if (filledIds && typeof filledIds.add === 'function') filledIds.add(playerId);
+        return true;
+    }
+
+    function releaseHostFilledSubmission(submissions, filledIds, playerId) {
+        if (!filledIds || typeof filledIds.has !== 'function' || !filledIds.has(playerId)) return false;
+        filledIds.delete(playerId);
+        if (submissions && Object.prototype.hasOwnProperty.call(submissions, playerId)) {
+            delete submissions[playerId];
+        }
+        return true;
+    }
+
+    function fillUnsubmittedFromSnapshots(submissions, players, snapshots, round) {
+        const bag = submissions && typeof submissions === 'object' ? submissions : Object.create(null);
+        (players || []).forEach(function (player) {
+            if (!player || player.isAi || player.id == null) return;
+            if (Object.prototype.hasOwnProperty.call(bag, player.id)) return;
+            const snap = snapshots && snapshots[player.id];
+            if (!snap || Number(snap.round) !== Number(round)) return;
+            bag[player.id] = Array.isArray(snap.words) ? snap.words.slice() : [];
+        });
+        return bag;
+    }
+
     /**
      * Accept submit_words only for ids currently in live presence (or reclaim seats).
      * firstWriteWins blocks later overwrites (incl. some spoof races).
@@ -199,6 +230,9 @@
         applyUniqueWordToLedger: applyUniqueWordToLedger,
         overlayLedgerScores: overlayLedgerScores,
         keepLockedSubmission: keepLockedSubmission,
+        rememberHostFilledSubmission: rememberHostFilledSubmission,
+        releaseHostFilledSubmission: releaseHostFilledSubmission,
+        fillUnsubmittedFromSnapshots: fillUnsubmittedFromSnapshots,
         canAcceptWordSubmission: canAcceptWordSubmission
     };
 }));

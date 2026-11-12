@@ -56,6 +56,7 @@ let myRoomCode = '';
 let myPlayerName = '';
 // Host-specific memory for collision checking
 let hostSubmissions = {};
+let hostFilledSubmissionIds = new Set();
 let roundFinalized = false;
 let finalizeWatchdog = null;
 let activePlayersList = []; // Kept in sync via presence
@@ -197,6 +198,7 @@ const letterBag = [
 ];
 
 let timeLeft = 60;
+let roundEndsAt = null;
 let timerInterval = null;
 let countdownInterval = null;
 let draftedWords = [];
@@ -833,8 +835,9 @@ function rememberDepartedPlayers(departed) {
         const seat = makeDisconnectedSeat(player);
         disconnectedSeats.push(seat);
         if (!roundFinalized && boardLetters.length === 16) {
-            WordperfectIntegrity.keepLockedSubmission(
+            WordperfectIntegrity.rememberHostFilledSubmission(
                 hostSubmissions,
+                hostFilledSubmissionIds,
                 seat.id,
                 sanitizeSubmittedWords(seat.draftedWords)
             );
@@ -849,7 +852,11 @@ function reconcileDisconnectedSeats(livePlayers) {
     if (!isHost || disconnectedSeats.length === 0) return false;
     const liveIds = new Set(livePlayers.map(player => player.id));
     const before = disconnectedSeats.length;
-    disconnectedSeats = disconnectedSeats.filter(seat => !liveIds.has(seat.id));
+    disconnectedSeats = disconnectedSeats.filter(seat => {
+        if (!liveIds.has(seat.id)) return true;
+        WordperfectIntegrity.releaseHostFilledSubmission(hostSubmissions, hostFilledSubmissionIds, seat.id);
+        return false;
+    });
     if (disconnectedSeats.length !== before) scheduleDisconnectedSeatCleanup();
     return disconnectedSeats.length !== before;
 }
@@ -1086,7 +1093,7 @@ async function maybeElectNewHost() {
 
         // Recover submissions lost when the previous host dropped or refreshed
         // Fresh bag so first-write-wins still accepts client resubmits after takeover
-        hostSubmissions = {};
+        resetHostSubmissions();
         roundFinalized = false;
         await roomChannel.send({
             type: 'broadcast',
@@ -1444,8 +1451,10 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
         sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
         sessionStorage.setItem('wordperfect_score_mode', scoreMode);
+        timeLeft = WordperfectRoundSync.roundStartTimeLeft(data.roundTime || secondsPerRound);
         sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
         sessionStorage.setItem('wordperfect_is_playing', 'true');
+        sessionStorage.setItem('wordperfect_time_left', String(timeLeft));
 
         hideOverlay(screenLobby);
         hideOverlay(screenStandings);
@@ -1799,7 +1808,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
             // Host refresh mid-round: ask locked-in clients to resend submissions
             if (isHost && isPlaying) {
-                hostSubmissions = {};
+                resetHostSubmissions();
                 roundFinalized = false;
                 await roomChannel.send({
                     type: 'broadcast',
@@ -1825,7 +1834,8 @@ async function startGameAsHost() {
     if (isPlaying || !roomChannel) return;
     isPlaying = true;
     appliedStartId = makeStartId();
-    hostSubmissions = {};
+    timeLeft = WordperfectRoundSync.roundStartTimeLeft(secondsPerRound);
+    resetHostSubmissions();
     roundFinalized = false;
     dropDisconnectedSeatsForNextRound();
     cachedBoardWords = null;
@@ -2247,7 +2257,7 @@ async function leaveRoomAndGoHome() {
     expectedHostGeneration = null;
     hostScoreLedger = Object.create(null);
     lastOfficialScores = Object.create(null);
-    hostSubmissions = {};
+    resetHostSubmissions();
     cachedBoardWords = null;
     cachedBoardKey = '';
 
@@ -3229,6 +3239,7 @@ function paintBoard() {
 
 // --- CORE LOOP ---
 function initRound(syncedTime = null) {
+    roundEndsAt = null;
     roundSubmitted = false;
     roundScored = false;
     if (syncedTime !== null) {
@@ -3295,6 +3306,9 @@ function initRound(syncedTime = null) {
 function startClock() {
     clockPausedByConnection = false;
     clearInterval(timerInterval);
+    if (roundEndsAt == null) {
+        roundEndsAt = Date.now() + Math.max(timeLeft, 0) * 1000;
+    }
     const paintClock = () => {
         const m = Math.floor(Math.max(timeLeft, 0) / 60).toString().padStart(2, '0');
         const s = (Math.max(timeLeft, 0) % 60).toString().padStart(2, '0');
@@ -3346,8 +3360,9 @@ async function endRound() {
 
     if (isHost) {
         disconnectedSeats.forEach(seat => {
-            WordperfectIntegrity.keepLockedSubmission(
+            WordperfectIntegrity.rememberHostFilledSubmission(
                 hostSubmissions,
+                hostFilledSubmissionIds,
                 seat.id,
                 sanitizeSubmittedWords(seat.draftedWords || [])
             );
@@ -3365,11 +3380,24 @@ async function endRound() {
     // never reports, so presence changes alone can't rescue the round. Close it anyway.
     if (isHost) {
         clearTimeout(finalizeWatchdog);
+        const graceMs = WordperfectRoundSync.graceUntilRoundEnd(roundEndsAt, Date.now(), 10000);
         finalizeWatchdog = setTimeout(() => {
+            if (!isHost || roundFinalized) return;
             console.warn("Finalize watchdog fired - closing round without every submission.");
+            WordperfectIntegrity.fillUnsubmittedFromSnapshots(
+                hostSubmissions,
+                activePlayersList.filter(player => !player.isAi),
+                draftSnapshots,
+                currentRound
+            );
             finalizeRound();
-        }, 10000);
+        }, graceMs);
     }
+}
+
+function resetHostSubmissions() {
+    hostSubmissions = {};
+    hostFilledSubmissionIds.clear();
 }
 
 actionBtn.addEventListener('click', () => {

@@ -40,12 +40,27 @@
         return !isPlaying && !roundScored;
     }
 
+    // Host lock-in waits out the round that already started, then the same grace
+    // a frozen guest gets after the clock hits zero.
+    function graceUntilRoundEnd(roundEndsAt, now, graceMs) {
+        const grace = graceMs == null ? 10000 : graceMs;
+        if (roundEndsAt == null || now == null) return grace;
+        return Math.max(Number(roundEndsAt) - Number(now), 0) + grace;
+    }
+
+    function roundStartTimeLeft(roundTime) {
+        const seconds = Number(roundTime);
+        return seconds > 0 ? seconds : 60;
+    }
+
     return {
         keepPauseFlag: keepPauseFlag,
         shouldRebuildRound: shouldRebuildRound,
         shouldEnterRoundFromSync: shouldEnterRoundFromSync,
         shouldAdoptHostTime: shouldAdoptHostTime,
         shouldArmTakeoverWatchdog: shouldArmTakeoverWatchdog,
-        shouldResubmitDraft: shouldResubmitDraft
+        shouldResubmitDraft: shouldResubmitDraft,
+        graceUntilRoundEnd: graceUntilRoundEnd,
+        roundStartTimeLeft: roundStartTimeLeft
     };
 }));

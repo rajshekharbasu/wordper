@@ -177,6 +177,44 @@ test('a takeover ledger keeps the last official totals', () => {
     assert.strictEqual(fresh.guest.score, 0);
 });
 
+test('a host-filled draft is dropped when that player comes back', () => {
+    const submissions = {};
+    const filled = new Set();
+    assert.equal(integrity.rememberHostFilledSubmission(submissions, filled, 'p1', ['RAIN']), true);
+    assert.deepStrictEqual(submissions.p1, ['RAIN']);
+    assert.equal(integrity.rememberHostFilledSubmission(submissions, filled, 'p1', ['STAIN']), false);
+    assert.deepStrictEqual(submissions.p1, ['RAIN']);
+
+    assert.equal(integrity.releaseHostFilledSubmission(submissions, filled, 'p1'), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(submissions, 'p1'), false);
+    assert.equal(filled.has('p1'), false);
+});
+
+test('a player submission is not released just because they reconnect', () => {
+    const submissions = { p1: ['RAIN'] };
+    const filled = new Set();
+    assert.equal(integrity.releaseHostFilledSubmission(submissions, filled, 'p1'), false);
+    assert.deepStrictEqual(submissions.p1, ['RAIN']);
+});
+
+test('the round deadline scores a snapshot the player never submitted', () => {
+    const submissions = { host: ['HOST'] };
+    integrity.fillUnsubmittedFromSnapshots(
+        submissions,
+        [{ id: 'host' }, { id: 'guest' }, { id: 'bot', isAi: true }, { id: 'old' }],
+        {
+            guest: { round: 2, words: ['RAIN', 'STAIN'] },
+            old: { round: 1, words: ['GONE'] },
+            bot: { round: 2, words: ['BOTS'] }
+        },
+        2
+    );
+    assert.deepStrictEqual(submissions.host, ['HOST']);
+    assert.deepStrictEqual(submissions.guest, ['RAIN', 'STAIN']);
+    assert.equal(Object.prototype.hasOwnProperty.call(submissions, 'old'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(submissions, 'bot'), false);
+});
+
 test('a locked word list survives a later disconnect draft', () => {
     const submissions = { p1: ['STAIN', 'RAIN'] };
     const kept = integrity.keepLockedSubmission(submissions, 'p1', []);
