@@ -60,7 +60,54 @@ let hostFilledSubmissionIds = new Set();
 let roundFinalized = false;
 let finalizeWatchdog = null;
 let activePlayersList = []; // Kept in sync via presence
+let broadcastScores = Object.create(null); // Scores via broadcast, not presence
+let broadcastReadyStates = Object.create(null); // Ready states via broadcast, not presence
 let hostElectionInProgress = false;
+let suppressAutoStart = false; // Prevents auto-start until synced after rejoin
+
+function getPlayersWithScores(players) {
+    return players.map(p => {
+        let result = p;
+        const bs = broadcastScores[p.id];
+        if (bs) {
+            result = {
+                ...result,
+                score: bs.score,
+                totalWords: bs.totalWords,
+                wordAttempts: bs.wordAttempts,
+                wordErrors: bs.wordErrors
+            };
+        }
+        result = {
+            ...result,
+            isReady: getPlayerReadyState(p.id)
+        };
+        return result;
+    });
+}
+
+function getPlayerReadyState(playerId) {
+    if (playerId === myPlayerId) return isReady;
+    const state = broadcastReadyStates[playerId];
+    return state ? state.isReady : false;
+}
+
+function getAllPlayersReady(players) {
+    const readyPlayers = players.filter(p => !p.isDisconnected && !p.isAi);
+    if (readyPlayers.length === 0) return false;
+    return readyPlayers.every(p => getPlayerReadyState(p.id));
+}
+
+function canAutoStartGame() {
+    if (!isHost) return false;
+    if (isPlaying) return false;
+    if (!isReady) return false;
+    if (suppressAutoStart) return false;
+    const onLobby = screenLobby.classList.contains('active');
+    const onStandings = screenStandings.classList.contains('active');
+    if (!onLobby && !onStandings) return false;
+    return getAllPlayersReady(activePlayersList);
+}
 let lastKnownHostId = null;
 let hostGeneration = 0; // bumps on host election; soft auth for host-gated broadcasts
 let expectedHostGeneration = null; // guests mirror live host presence hostGeneration
@@ -279,6 +326,28 @@ let dictionarySet = new Set();
 let penaltyActive = false;
 let penaltyTimeLeft = 5;
 let penaltyInterval = null;
+let readyRefreshInterval = null;
+
+// Periodic ready state refresh for self-healing (re-broadcasts when on lobby/standings)
+function startReadyRefresh() {
+    stopReadyRefresh();
+    readyRefreshInterval = setInterval(async () => {
+        if (!roomChannel) return;
+        const onLobby = screenLobby && screenLobby.classList.contains('active');
+        const onStandings = screenStandings && screenStandings.classList.contains('active');
+        if ((onLobby || onStandings) && !isPlaying) {
+            // Force re-broadcast to heal any missed updates
+            await broadcastReadyState(true);
+        }
+    }, 5000);
+}
+
+function stopReadyRefresh() {
+    if (readyRefreshInterval) {
+        clearInterval(readyRefreshInterval);
+        readyRefreshInterval = null;
+    }
+}
 
 // --- DOM NODES ---
 const tiles = document.querySelectorAll('.tile');
@@ -436,7 +505,8 @@ function confirmRoomExists() {
     roomProbeTimer = null;
     setJoinBusy(false);
     hideJoinStatus();
-    syncMyState();
+    // Don't call syncMyState here - the delayed one from subscribe handles it
+    // This prevents duplicate tracks at join
     revealRoom();
 }
 
@@ -951,6 +1021,15 @@ function dropPausedClock() {
     timerInterval = null;
 }
 
+function pauseRoundClock() {
+    if (timerInterval != null) {
+        console.log('Pausing round clock, timeLeft:', timeLeft);
+        clockPausedByConnection = true;
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
+}
+
 function noteRoomContact() {
     connectionRecovery.noteContact();
 }
@@ -990,39 +1069,121 @@ const connectionRecovery = WordperfectConnectionRecovery.create({
                 ? 'Rejoin failed. Check your connection and try again.'
                 : undefined
         );
+        if (!reconnectManager.isActive() && roomChannel && !intentionallyClosedChannels.has(roomChannel)) {
+            reconnectManager.start();
+        }
     },
     onRecovered() {
         dismissConnectionLoss();
+        reconnectManager.success();
     }
 });
+
+const reconnectManager = WordperfectConnectionRecovery.createReconnectManager({
+    onReconnect(attempt) {
+        console.log('Attempting reconnection, attempt:', attempt);
+        if (!myRoomCode || !myPlayerName) {
+            return Promise.reject(new Error('No room to rejoin'));
+        }
+        return attemptChannelReconnect();
+    },
+    onGiveUp() {
+        console.warn('Reconnection attempts exhausted');
+        showConnectionError('Could not reconnect. Please refresh the page.');
+    }
+});
+
+let reconnectResolve = null;
+let reconnectReject = null;
+
+async function attemptChannelReconnect() {
+    if (!myRoomCode || !myPlayerName) {
+        throw new Error('No room to rejoin');
+    }
+    
+    const oldChannel = roomChannel;
+    if (oldChannel) {
+        try {
+            intentionallyClosedChannels.add(oldChannel);
+            await supabaseClient.removeChannel(oldChannel);
+        } catch (e) {
+            console.warn('Error removing old channel during reconnect:', e);
+        }
+        roomChannel = null;
+    }
+    
+    reconnectInProgress = true;
+    
+    return new Promise((resolve, reject) => {
+        reconnectResolve = resolve;
+        reconnectReject = reject;
+        
+        const timeoutId = setTimeout(() => {
+            reconnectResolve = null;
+            reconnectReject = null;
+            reject(new Error('Reconnect timed out'));
+        }, 15000);
+        
+        joinRealtimeRoom(myRoomCode, myPlayerName, isHost, true)
+            .then(() => {
+                // joinRealtimeRoom sets up the channel but SUBSCRIBED comes asynchronously
+                // The resolve/reject will be called from the subscribe callback
+            })
+            .catch((err) => {
+                clearTimeout(timeoutId);
+                reconnectResolve = null;
+                reconnectReject = null;
+                reject(err);
+            });
+    });
+}
+
+function handleReconnectStatus(status) {
+    if (status === 'SUBSCRIBED') {
+        if (reconnectResolve) {
+            reconnectManager.success();
+            const resolve = reconnectResolve;
+            reconnectResolve = null;
+            reconnectReject = null;
+            resolve();
+        }
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        if (reconnectReject && reconnectInProgress) {
+            const reject = reconnectReject;
+            reconnectResolve = null;
+            reconnectReject = null;
+            reject(new Error('Reconnect failed: ' + status));
+        }
+    }
+}
 
 document.addEventListener('visibilitychange', () => {
     connectionRecovery.handleVisibility();
 });
 
+let hostElectionGrace = null;
+function initHostElectionGrace() {
+    hostElectionGrace = WordperfectPresenceSync.createHostElectionGrace({
+        onElect() {
+            performHostElection();
+        }
+    });
+}
+initHostElectionGrace();
 
-const submitPresence = WordperfectPresenceSync.createLatest((payload) => {
+
+const throttledPresence = WordperfectPresenceSync.createThrottled((payload) => {
     if (!roomChannel) return;
     return roomChannel.track(payload);
 });
 
-async function syncMyState() {
-    if (!roomChannel) return;
-
-    console.log("Broadcasting my state: Ready =", isReady);
-
+function buildTrackPayload() {
     const trackPayload = {
         id: myPlayerId,
         name: myPlayerName,
-        isReady: isReady,
-        score: myTotalScore,
-        totalWords: myTotalWords,
-        wordAttempts: wordAttempts,
-        wordErrors: wordErrors,
         isHost: isHost,
         isPlaying: isPlaying,
-        isPendingJoin: awaitingHostConfirm && !reclaimingSeat,
-        updatedAt: Date.now()
+        isPendingJoin: awaitingHostConfirm && !reclaimingSeat
     };
 
     if (isHost) {
@@ -1033,11 +1194,93 @@ async function syncMyState() {
         trackPayload.disconnectedSeats = disconnectedSeats;
         trackPayload.hostGeneration = hostGeneration;
     }
-
-    await submitPresence(trackPayload);
+    return trackPayload;
 }
 
-async function maybeElectNewHost() {
+let lastBroadcastScoreState = null;
+async function broadcastScoreState() {
+    if (!roomChannel) return;
+    const scoreState = {
+        playerId: myPlayerId,
+        score: myTotalScore,
+        totalWords: myTotalWords,
+        wordAttempts: wordAttempts,
+        wordErrors: wordErrors
+    };
+    const stateKey = JSON.stringify(scoreState);
+    if (stateKey === lastBroadcastScoreState) return;
+    lastBroadcastScoreState = stateKey;
+    try {
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'player_score_update',
+            payload: scoreState
+        });
+    } catch (e) {
+        console.warn('Failed to broadcast score update:', e);
+    }
+}
+
+let lastBroadcastReadyState = null;
+async function broadcastReadyState(force = false) {
+    if (!roomChannel) return;
+    const readyState = {
+        playerId: myPlayerId,
+        isReady: isReady
+    };
+    const stateKey = JSON.stringify(readyState);
+    if (!force && stateKey === lastBroadcastReadyState) return;
+    lastBroadcastReadyState = stateKey;
+    try {
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'player_ready_update',
+            payload: readyState
+        });
+    } catch (e) {
+        console.warn('Failed to broadcast ready update:', e);
+    }
+}
+
+function clearReadyStateDedup() {
+    lastBroadcastReadyState = null;
+}
+
+async function syncMyState() {
+    if (!roomChannel) return;
+
+    console.log("Broadcasting my state: Ready =", isReady);
+    await throttledPresence.submit(buildTrackPayload());
+}
+
+async function syncMyStateImmediate() {
+    if (!roomChannel) return;
+    await throttledPresence.flush();
+    await roomChannel.track(buildTrackPayload());
+}
+
+function maybeElectNewHost() {
+    if (!roomChannel || hostElectionInProgress) return;
+
+    const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
+    if (realPlayers.length === 0) return;
+    
+    const hasLiveHost = realPlayers.some(p => p.isHost);
+    if (hasLiveHost) {
+        if (hostElectionGrace) hostElectionGrace.hostReturned();
+        return;
+    }
+
+    const electedId = [...realPlayers]
+        .map(p => p.id)
+        .sort((a, b) => String(a).localeCompare(String(b)))[0];
+    
+    if (hostElectionGrace) {
+        hostElectionGrace.handlePresenceChange(hasLiveHost, myPlayerId, electedId);
+    }
+}
+
+async function performHostElection() {
     if (!roomChannel || hostElectionInProgress) return;
 
     const realPlayers = activePlayersList.filter(p => !p.isAi && !p.isDisconnected);
@@ -1102,9 +1345,11 @@ async function maybeElectNewHost() {
         });
 
         clearTimeout(finalizeWatchdog);
-        if (WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft, roundScored)) {
+        const hasActiveRound = boardLetters && boardLetters.length > 0 && appliedStartId != null;
+        if (hasActiveRound && WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft, roundScored)) {
             finalizeWatchdog = setTimeout(() => {
-                if (isHost && !roundFinalized) {
+                // Double-check host status and channel health before finalizing
+                if (isHost && !roundFinalized && roomChannel && !intentionallyClosedChannels.has(roomChannel)) {
                     console.warn('Finalize watchdog fired after host takeover.');
                     finalizeRound();
                 }
@@ -1120,6 +1365,33 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
     myPlayerName = name;
     isHost = hostFlag;
     recoveringAsFormerHost = hostFlag && isRecovery;
+    
+    // Suppress auto-start on recovery until we sync with peers
+    if (isRecovery) {
+        suppressAutoStart = true;
+        // Clear broadcast ready states on recovery - we need fresh data from peers
+        broadcastReadyStates = Object.create(null);
+        // Clear dedup so we re-broadcast our ready state
+        clearReadyStateDedup();
+        // Clear suppression after a longer grace period, but only if still on lobby
+        // (report_phase and sync_game_state handlers will clear it sooner when appropriate)
+        setTimeout(() => {
+            // Only auto-clear if we're on lobby and haven't navigated elsewhere
+            // This prevents starting alone if peers didn't respond
+            if (suppressAutoStart && screenLobby.classList.contains('active')) {
+                const peerCount = activePlayersList.filter(p => p.id !== myPlayerId && !p.isAi && !p.isDisconnected).length;
+                if (peerCount === 0) {
+                    // No peers, safe to clear suppression
+                    suppressAutoStart = false;
+                } else {
+                    console.warn('suppressAutoStart timeout but peers present - staying suppressed');
+                    // Peers exist but we haven't heard from them - keep suppressed
+                    // They might be on a different screen
+                }
+            }
+        }, 5000);
+    }
+    
     if (hostFlag) {
         if (isRecovery) {
             restoreHostScoreLedger();
@@ -1187,13 +1459,23 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         const anotherHost = livePresencePlayers.find(
             player => player.isHost && !player.isAi && player.id !== myPlayerId
         );
-        if (isHost && recoveringAsFormerHost && anotherHost) {
-            isHost = false;
-            disconnectedSeats = [];
-            sessionStorage.setItem('wordperfect_is_host', 'false');
-            const myLiveState = livePresencePlayers.find(player => player.id === myPlayerId);
-            if (myLiveState) myLiveState.isHost = false;
-            syncMyState();
+        if (isHost && anotherHost) {
+            const shouldDemote = recoveringAsFormerHost ||
+                (anotherHost.hostGeneration != null && hostGeneration != null &&
+                 Number(anotherHost.hostGeneration) > Number(hostGeneration)) ||
+                String(anotherHost.id).localeCompare(String(myPlayerId)) < 0;
+            
+            if (shouldDemote) {
+                console.log('Demoting self as host - another host present:', anotherHost.id);
+                isHost = false;
+                recoveringAsFormerHost = false;
+                disconnectedSeats = [];
+                if (hostElectionGrace) hostElectionGrace.reset();
+                sessionStorage.setItem('wordperfect_is_host', 'false');
+                const myLiveState = livePresencePlayers.find(player => player.id === myPlayerId);
+                if (myLiveState) myLiveState.isHost = false;
+                syncMyState();
+            }
         }
         const liveIds = new Set(livePresencePlayers.map(player => player.id));
         const departed = previousLivePlayers.filter(
@@ -1216,8 +1498,19 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         // A pending guest is only probing the room. It becomes visible after lobby
         // validation, or after the host grants a disconnected-seat claim.
         const visibleLivePlayers = livePresencePlayers.filter(player => !player.isPendingJoin);
-        activePlayersList = [...visibleLivePlayers, ...aiPlayersToAppend, ...seatsForRoster];
-        if (isHost && (departedChanged || reclaimedChanged)) syncMyState();
+        
+        // Filter out disconnected seats that have a matching live player (prevents duplicates)
+        const livePlayerIds = new Set(visibleLivePlayers.map(p => p.id));
+        const aiPlayerIds = new Set(aiPlayersToAppend.map(p => p.id));
+        const deduplicatedSeats = seatsForRoster.filter(seat => 
+            !livePlayerIds.has(seat.id) && !aiPlayerIds.has(seat.id)
+        );
+        
+        activePlayersList = [...visibleLivePlayers, ...aiPlayersToAppend, ...deduplicatedSeats];
+        // Only sync if roster actually changed, and delay during active play to reduce rate limit pressure
+        if (isHost && (departedChanged || reclaimedChanged) && !isPlaying) {
+            syncMyState();
+        }
 
         // Cache bots whenever we see them — host leave removes them from presence, but
         // the elected replacement still needs the roster mid-round.
@@ -1275,17 +1568,12 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         }
         reconcileBots(realPlayerCount);
 
-        renderLobbyPlayers(activePlayersList);
+        renderLobbyPlayers(getPlayersWithScores(activePlayersList));
         if (screenStandings.classList.contains('active')) {
-            renderStandingsScreen(activePlayersList, currentRound > 1 ? currentRound - 1 : 1);
+            renderStandingsScreen(getPlayersWithScores(activePlayersList), currentRound > 1 ? currentRound - 1 : 1);
         }
 
-        if (WordperfectPresenceSync.shouldStartLobby({
-            isHost,
-            isPlaying,
-            isReady,
-            players: activePlayersList
-        })) {
+        if (!suppressAutoStart && canAutoStartGame()) {
             console.log("Host detected all players are ready. Starting game...");
             startGameAsHost();
         }
@@ -1461,11 +1749,38 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         startCountdown();
     });
 
-    // Listen for request_sync (Host responds to rejoining clients)
+    // Listen for request_sync (Host responds to rejoining clients, all clients report phase)
     roomChannel.on('broadcast', { event: 'request_sync' }, async (response) => {
         const data = getBroadcastData(response);
-        if (isHost && isPlaying) {
+        if (data.requesterId === myPlayerId) return; // Don't respond to self
+        
+        const phase = isPlaying ? 'playing' : 
+                      screenResults.classList.contains('active') ? 'results' :
+                      screenStandings.classList.contains('active') ? 'standings' :
+                      screenWinner.classList.contains('active') ? 'winner' : 'lobby';
+        
+        // All clients report their phase so recovering hosts can adopt peer phase
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'report_phase',
+            payload: { 
+                playerId: myPlayerId, 
+                phase: phase,
+                currentRound: currentRound,
+                isReady: isReady,
+                board: boardLetters,
+                scores: lastOfficialScores
+            }
+        });
+        
+        // Force-broadcast ready state to ensure recovering clients get it
+        // This bypasses dedup since we're responding to a sync request
+        await broadcastReadyState(true);
+        
+        // Host also sends full sync_game_state
+        if (isHost) {
             console.log("Host received request_sync from requester:", data.requesterId);
+            
             await roomChannel.send({
                 type: 'broadcast',
                 event: 'sync_game_state',
@@ -1475,7 +1790,15 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                     maxRounds: maxRounds,
                     roundTime: secondsPerRound,
                     scoreMode: scoreMode,
-                    timeLeft: timeLeft
+                    timeLeft: isPlaying ? timeLeft : secondsPerRound,
+                    phase: phase,
+                    roundSubmitted: roundSubmitted,
+                    readyStates: Object.fromEntries(
+                        activePlayersList
+                            .filter(p => !p.isAi && !p.isDisconnected)
+                            .map(p => [p.id, getPlayerReadyState(p.id)])
+                    ),
+                    officialScores: lastOfficialScores
                 })
             });
         }
@@ -1495,48 +1818,207 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         }
     });
 
-    // Listen for sync_game_state (Guests align with Host)
+    // Listen for report_phase (all clients report their phase; recovering hosts adopt peer phase)
+    roomChannel.on('broadcast', { event: 'report_phase' }, (response) => {
+        const data = getBroadcastData(response);
+        if (!data.playerId || data.playerId === myPlayerId) return;
+        
+        // Update ready state from peer
+        if (data.isReady !== undefined) {
+            broadcastReadyStates[data.playerId] = {
+                isReady: !!data.isReady,
+                updatedAt: Date.now()
+            };
+        }
+        
+        // Recovering host adopts peer phase if they're ahead
+        if (isHost && recoveringAsFormerHost && suppressAutoStart) {
+            const peerPhase = data.phase || 'lobby';
+            const peerRound = Number(data.currentRound) || 1;
+            
+            console.log("Recovering host received phase report:", peerPhase, "round:", peerRound);
+            
+            // Restore board from peer if we have an empty board
+            if (Array.isArray(data.board) && data.board.length > 0 && (!boardLetters || boardLetters.length === 0)) {
+                console.log("Restoring board from peer:", data.board);
+                boardLetters = data.board;
+                sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
+            }
+            
+            // Restore official scores from peer if we have empty scores
+            if (data.scores && typeof data.scores === 'object' && Object.keys(data.scores).length > 0) {
+                if (!lastOfficialScores || Object.keys(lastOfficialScores).length === 0) {
+                    console.log("Restoring scores from peer:", data.scores);
+                    lastOfficialScores = { ...data.scores };
+                    // Also update hostScoreLedger from these scores
+                    for (const [playerId, scoreData] of Object.entries(data.scores)) {
+                        if (!hostScoreLedger[playerId]) {
+                            hostScoreLedger[playerId] = { score: 0, totalWords: 0 };
+                        }
+                        hostScoreLedger[playerId].score = scoreData.score || 0;
+                        hostScoreLedger[playerId].totalWords = scoreData.totalWords || 0;
+                    }
+                }
+            }
+            
+            // If peer is not in lobby, adopt their phase
+            if (peerPhase !== 'lobby') {
+                console.log("Adopting peer phase:", peerPhase, "round:", peerRound);
+                currentRound = peerRound;
+                sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
+                
+                // Navigate to correct screen
+                hideOverlay(screenLobby);
+                if (peerPhase === 'results') {
+                    showOverlay(screenResults);
+                    recoveringAsFormerHost = false;
+                    suppressAutoStart = false;
+                } else if (peerPhase === 'standings') {
+                    showOverlay(screenStandings);
+                    renderStandingsScreen(getPlayersWithScores(activePlayersList), peerRound > 1 ? peerRound - 1 : 1);
+                    startReadyRefresh();
+                    recoveringAsFormerHost = false;
+                    suppressAutoStart = false;
+                } else if (peerPhase === 'winner') {
+                    showOverlay(screenWinner);
+                    recoveringAsFormerHost = false;
+                    suppressAutoStart = false;
+                } else if (peerPhase === 'playing') {
+                    // Peer is playing but we just joined - stay suppressed
+                    console.log("Peer is playing, staying suppressed");
+                }
+            } else {
+                // Peer is also in lobby - safe to clear suppression
+                recoveringAsFormerHost = false;
+                suppressAutoStart = false;
+            }
+        }
+    });
+
+    // Listen for sync_game_state (Guests and recovering hosts align with current host)
     roomChannel.on('broadcast', { event: 'sync_game_state' }, (response) => {
         const data = getBroadcastData(response);
         if (!isFromCurrentHost(data)) {
             console.warn('Ignoring sync_game_state from non-host');
             return;
         }
-        if (!isHost) {
-            if (roundSubmitted) return;
-
-            console.log("Received sync_game_state from host:", data);
-            
-            // Sync game parameters
-            boardLetters = data.board;
-            currentRound = data.currentRound;
-            maxRounds = data.maxRounds;
-            secondsPerRound = data.roundTime || 60;
-            scoreMode = data.scoreMode || 'classic';
-            setModeToggleUI(scoreMode);
-            cachedBoardWords = null;
-            cachedBoardKey = '';
-
-            const syncedLeft = typeof data.timeLeft === 'number' ? data.timeLeft : secondsPerRound;
-
-            sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
-            sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
-            sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
-            sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
-            sessionStorage.setItem('wordperfect_score_mode', scoreMode);
-            sessionStorage.setItem('wordperfect_is_playing', 'true');
-            sessionStorage.setItem('wordperfect_time_left', String(syncedLeft));
-
-            if (WordperfectRoundSync.shouldEnterRoundFromSync(isPlaying, roundSubmitted)) {
-                hideOverlay(screenLobby);
-                hideOverlay(screenStandings);
-                hideOverlay(screenResults);
-                updateLobbyRoundText();
-                initRound(syncedLeft);
-            } else if (WordperfectRoundSync.shouldAdoptHostTime(clockPausedByConnection, isPlaying)) {
-                timeLeft = syncedLeft;
-                resumeRoundClock();
+        
+        const incomingRound = Number(data.currentRound) || 1;
+        const hostPhase = data.phase || 'playing';
+        
+        // For recovering hosts: if we're in lobby but peers are in results/standings/winner,
+        // we should adopt their phase rather than starting a new round
+        if (isHost && recoveringAsFormerHost) {
+            console.log("Recovering host received sync_game_state, phase:", hostPhase);
+            if (hostPhase !== 'lobby' && screenLobby.classList.contains('active')) {
+                // Peers are not in lobby, demote self and follow
+                console.log("Demoting self - peers are in", hostPhase, "phase");
+                isHost = false;
+                recoveringAsFormerHost = false;
+                sessionStorage.setItem('wordperfect_is_host', 'false');
+                if (hostElectionGrace) hostElectionGrace.reset();
             }
+            suppressAutoStart = false;
+        }
+        
+        if (isHost) return;
+        
+        if (incomingRound < currentRound) {
+            console.warn('Ignoring sync_game_state for older round:', incomingRound, 'vs', currentRound);
+            return;
+        }
+        
+        if (roundSubmitted && incomingRound === currentRound && hostPhase === 'playing') {
+            return;
+        }
+
+        console.log("Received sync_game_state from host:", data, "phase:", hostPhase);
+        
+        // Clear auto-start suppression after receiving valid sync
+        suppressAutoStart = false;
+        
+        // Restore ready states from host (for late joiners/reconnecters)
+        if (data.readyStates && typeof data.readyStates === 'object') {
+            for (const [playerId, readyState] of Object.entries(data.readyStates)) {
+                if (playerId !== myPlayerId) {
+                    broadcastReadyStates[playerId] = {
+                        isReady: !!readyState,
+                        updatedAt: Date.now()
+                    };
+                }
+            }
+        }
+        
+        // Restore official scores from host (for late joiners/reconnecters)
+        if (data.officialScores && typeof data.officialScores === 'object') {
+            for (const [playerId, scoreData] of Object.entries(data.officialScores)) {
+                if (!lastOfficialScores[playerId]) {
+                    lastOfficialScores[playerId] = { score: 0, totalWords: 0 };
+                }
+                lastOfficialScores[playerId].score = scoreData.score || 0;
+                lastOfficialScores[playerId].totalWords = scoreData.totalWords || 0;
+            }
+        }
+        
+        maxRounds = data.maxRounds;
+        secondsPerRound = data.roundTime || 60;
+        scoreMode = data.scoreMode || 'classic';
+        setModeToggleUI(scoreMode);
+        
+        sessionStorage.setItem('wordperfect_max_rounds', maxRounds.toString());
+        sessionStorage.setItem('wordperfect_seconds_per_round', secondsPerRound.toString());
+        sessionStorage.setItem('wordperfect_score_mode', scoreMode);
+        
+        if (hostPhase === 'lobby') {
+            currentRound = incomingRound;
+            sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
+            sessionStorage.removeItem('wordperfect_is_playing');
+            updateLobbyRoundText();
+            if (!screenLobby.classList.contains('active')) {
+                hideOverlay(screenResults);
+                hideOverlay(screenStandings);
+                hideOverlay(screenWinner);
+                showOverlay(screenLobby);
+            }
+            return;
+        }
+        
+        if (hostPhase === 'results' || hostPhase === 'standings' || hostPhase === 'winner') {
+            currentRound = incomingRound;
+            sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
+            // Navigate to the correct phase screen
+            hideOverlay(screenLobby);
+            if (hostPhase === 'results') {
+                showOverlay(screenResults);
+            } else if (hostPhase === 'standings') {
+                showOverlay(screenStandings);
+            } else if (hostPhase === 'winner') {
+                showOverlay(screenWinner);
+            }
+            return;
+        }
+        
+        boardLetters = data.board;
+        currentRound = incomingRound;
+        cachedBoardWords = null;
+        cachedBoardKey = '';
+
+        const syncedLeft = typeof data.timeLeft === 'number' ? data.timeLeft : secondsPerRound;
+
+        sessionStorage.setItem('wordperfect_board_letters', JSON.stringify(boardLetters));
+        sessionStorage.setItem('wordperfect_current_round', currentRound.toString());
+        sessionStorage.setItem('wordperfect_is_playing', 'true');
+        sessionStorage.setItem('wordperfect_time_left', String(syncedLeft));
+
+        if (WordperfectRoundSync.shouldEnterRoundFromSync(isPlaying, roundSubmitted)) {
+            hideOverlay(screenLobby);
+            hideOverlay(screenStandings);
+            hideOverlay(screenResults);
+            updateLobbyRoundText();
+            initRound(syncedLeft);
+        } else if (WordperfectRoundSync.shouldAdoptHostTime(clockPausedByConnection, isPlaying)) {
+            timeLeft = syncedLeft;
+            resumeRoundClock();
         }
     });
 
@@ -1675,7 +2157,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             sessionStorage.setItem('wordperfect_total_score', myTotalScore.toString());
             sessionStorage.setItem('wordperfect_total_words', myTotalWords.toString());
             totalScoreDisplay.textContent = `Total: ${myTotalScore} pts`;
-            await syncMyState(); // Update presence with new score
+            await broadcastScoreState();
         }
 
         if (data.isGameOver) {
@@ -1691,6 +2173,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                 hideOverlay(screenResults);
                 showOverlay(screenStandings);
                 renderStandingsScreen(data.players, data.currentRound);
+                startReadyRefresh();
             };
         }
     });
@@ -1708,6 +2191,11 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         roundScored = false;
         currentRound = 1;
         lastOfficialScores = Object.create(null);
+        broadcastScores = Object.create(null);
+        broadcastReadyStates = Object.create(null);
+        lastBroadcastScoreState = null;
+        lastBroadcastReadyState = null;
+        suppressAutoStart = false;
         myTotalScore = 0;
         myTotalWords = 0;
         wordAttempts = 0;
@@ -1746,6 +2234,48 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         }
     });
 
+    // Player score updates via broadcast (not presence) to reduce presence traffic
+    roomChannel.on('broadcast', { event: 'player_score_update' }, (response) => {
+        const data = getBroadcastData(response);
+        if (!data.playerId) return;
+        broadcastScores[data.playerId] = {
+            score: Number(data.score) || 0,
+            totalWords: Number(data.totalWords) || 0,
+            wordAttempts: Number(data.wordAttempts) || 0,
+            wordErrors: Number(data.wordErrors) || 0,
+            updatedAt: Date.now()
+        };
+    });
+
+    // Player ready state updates via broadcast (not presence) to reduce presence traffic
+    roomChannel.on('broadcast', { event: 'player_ready_update' }, (response) => {
+        const data = getBroadcastData(response);
+        if (!data.playerId) return;
+        broadcastReadyStates[data.playerId] = {
+            isReady: !!data.isReady,
+            updatedAt: Date.now()
+        };
+        // Check if we should start the game now that ready states changed
+        if (!suppressAutoStart && canAutoStartGame()) {
+            console.log("Host detected all players are ready via broadcast. Starting game...");
+            startGameAsHost();
+        }
+        // Re-render to show ready indicators
+        if (screenLobby.classList.contains('active')) {
+            renderLobbyPlayers(getPlayersWithScores(activePlayersList));
+        } else if (screenStandings.classList.contains('active')) {
+            renderStandingsScreen(getPlayersWithScores(activePlayersList), currentRound > 1 ? currentRound - 1 : 1);
+        }
+    });
+    
+    // Host requests ready roll-call before starting (self-healing mechanism)
+    roomChannel.on('broadcast', { event: 'request_ready_roll_call' }, async (response) => {
+        const data = getBroadcastData(response);
+        if (!isFromCurrentHost(data)) return;
+        // Force-broadcast our current ready state
+        await broadcastReadyState(true);
+    });
+
     // 3. Subscribe
     roomChannel.subscribe(async (status) => {
         if (channel !== roomChannel) return;
@@ -1776,7 +2306,19 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             resetReadyButtons();
             syncAiSwitch();
 
-            await syncMyState();
+            // Delay initial presence sync to avoid duplicate tracks from Supabase's internal handling
+            // and to allow the throttle to coalesce any rapid state changes during join
+            setTimeout(async () => {
+                if (channel === roomChannel) {
+                    await syncMyState();
+                    // Force-broadcast initial ready state (bypass dedup for fresh joins)
+                    clearReadyStateDedup();
+                    await broadcastReadyState(true);
+                    // Start periodic ready refresh for self-healing
+                    startReadyRefresh();
+                }
+            }, 100);
+            
             displayRoomCode.textContent = myRoomCode;
             navRoomDisplay.textContent = `Room: ${myRoomCode}`;
             updateLobbyRoundText();
@@ -1819,7 +2361,20 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
             if (!intentionallyClosedChannels.has(channel)) {
                 console.warn('Realtime channel interrupted:', status);
+                // If we were host and channel is lost, stop driving the round
+                // to prevent split-brain with an elected replacement
+                if (isHost && isPlaying) {
+                    console.warn('Host lost channel while playing - stopping round activity');
+                    clearTimeout(finalizeWatchdog);
+                    finalizeWatchdog = null;
+                    pauseRoundClock();
+                }
             }
+        }
+        
+        // Handle reconnection status for pending reconnect attempts
+        if (reconnectInProgress) {
+            handleReconnectStatus(status);
         }
     });
 }
@@ -1832,6 +2387,34 @@ function makeStartId() {
 
 async function startGameAsHost() {
     if (isPlaying || !roomChannel) return;
+    
+    // Request fresh ready states from all clients before starting
+    // This ensures we have the latest ready states after any disconnects/reconnects
+    try {
+        await roomChannel.send({
+            type: 'broadcast',
+            event: 'request_ready_roll_call',
+            payload: hostPayload({})
+        });
+        // Brief wait for responses
+        await new Promise(resolve => setTimeout(resolve, 200));
+    } catch (e) {
+        console.warn('Failed to request ready roll-call:', e);
+    }
+    
+    // Final check: verify all players are still ready before starting
+    // This prevents starting with late joiners who haven't clicked Ready
+    if (!getAllPlayersReady(activePlayersList)) {
+        console.warn('startGameAsHost aborted: not all players ready');
+        return;
+    }
+    
+    // Double-check we're not already playing (might have changed during await)
+    if (isPlaying) return;
+    
+    // Stop ready refresh while playing
+    stopReadyRefresh();
+    
     isPlaying = true;
     appliedStartId = makeStartId();
     timeLeft = WordperfectRoundSync.roundStartTimeLeft(secondsPerRound);
@@ -2188,6 +2771,7 @@ async function leaveRoomAndGoHome() {
     clearInterval(penaltyInterval);
     penaltyInterval = null;
     penaltyActive = false;
+    stopReadyRefresh();
     clearTimeout(finalizeWatchdog);
     finalizeWatchdog = null;
     clearTimeout(roomProbeTimer);
@@ -2235,6 +2819,15 @@ async function leaveRoomAndGoHome() {
     myTotalScore = 0;
     myTotalWords = 0;
     wordAttempts = 0;
+    broadcastScores = Object.create(null);
+    broadcastReadyStates = Object.create(null);
+    lastBroadcastScoreState = null;
+    lastBroadcastReadyState = null;
+    suppressAutoStart = false;
+    reconnectResolve = null;
+    reconnectReject = null;
+    if (hostElectionGrace) hostElectionGrace.reset();
+    reconnectManager.reset();
     wordErrors = 0;
     myLocalAiPlayers = [];
     lastKnownAiPlayers = [];
@@ -2364,16 +2957,14 @@ async function toggleReady(button, idleLabel) {
     isReady = !isReady;
     button.style.backgroundColor = isReady ? 'var(--surface-black)' : 'var(--primary)';
     button.textContent = isReady ? 'Waiting for others...' : idleLabel;
-    if (WordperfectPresenceSync.shouldStartLobby({
-        isHost,
-        isPlaying,
-        isReady,
-        players: activePlayersList
-    })) {
+    
+    // Broadcast ready state change (much lighter than presence track)
+    await broadcastReadyState();
+    
+    if (canAutoStartGame()) {
         await startGameAsHost();
         return;
     }
-    await syncMyState();
 }
 
 btnReadyUp.addEventListener('click', () => toggleReady(btnReadyUp, lobbyReadyLabel()));

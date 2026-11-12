@@ -17,6 +17,80 @@
     // back to REST. Fifteen seconds of actual silence is the outage.
     const DEFAULT_GRACE_MS = 15000;
 
+    const DEFAULT_RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000];
+    const MAX_RECONNECT_ATTEMPTS = 5;
+
+    function createReconnectManager(options) {
+        var opts = options || {};
+        var delays = opts.delays || DEFAULT_RECONNECT_DELAYS;
+        var maxAttempts = opts.maxAttempts == null ? MAX_RECONNECT_ATTEMPTS : opts.maxAttempts;
+        var setTimeoutFn = opts.setTimeout || setTimeout;
+        var clearTimeoutFn = opts.clearTimeout || clearTimeout;
+        var onReconnect = opts.onReconnect || function () { return Promise.resolve(); };
+        var onGiveUp = opts.onGiveUp || function () {};
+
+        var attempt = 0;
+        var pendingTimer = null;
+        var active = false;
+
+        function clearPending() {
+            if (pendingTimer != null) {
+                clearTimeoutFn(pendingTimer);
+                pendingTimer = null;
+            }
+        }
+
+        function scheduleNext() {
+            if (!active) return;
+            if (attempt >= maxAttempts) {
+                active = false;
+                onGiveUp();
+                return;
+            }
+            var delay = delays[Math.min(attempt, delays.length - 1)];
+            pendingTimer = setTimeoutFn(function () {
+                pendingTimer = null;
+                if (!active) return;
+                attempt++;
+                Promise.resolve(onReconnect(attempt)).then(
+                    function () {},
+                    function () {
+                        scheduleNext();
+                    }
+                );
+            }, delay);
+        }
+
+        return {
+            start: function start() {
+                if (active) return;
+                active = true;
+                attempt = 0;
+                scheduleNext();
+            },
+            stop: function stop() {
+                active = false;
+                clearPending();
+            },
+            success: function success() {
+                active = false;
+                attempt = 0;
+                clearPending();
+            },
+            reset: function reset() {
+                active = false;
+                attempt = 0;
+                clearPending();
+            },
+            getAttempt: function getAttempt() {
+                return attempt;
+            },
+            isActive: function isActive() {
+                return active;
+            }
+        };
+    }
+
     function createConnectionRecovery(options = {}) {
         const graceMs = options.graceMs == null ? DEFAULT_GRACE_MS : options.graceMs;
         const visibleRetryMs = options.visibleRetryMs == null ? 1500 : options.visibleRetryMs;
@@ -132,6 +206,9 @@
     return {
         create: createConnectionRecovery,
         createConnectionRecovery: createConnectionRecovery,
-        graceMs: DEFAULT_GRACE_MS
+        createReconnectManager: createReconnectManager,
+        graceMs: DEFAULT_GRACE_MS,
+        DEFAULT_RECONNECT_DELAYS: DEFAULT_RECONNECT_DELAYS,
+        MAX_RECONNECT_ATTEMPTS: MAX_RECONNECT_ATTEMPTS
     };
 }));
