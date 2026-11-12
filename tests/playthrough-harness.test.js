@@ -38,6 +38,7 @@ const DICTIONARY = dictionaryText();
 
 function createBus() {
     const rooms = new Map();
+    const blocked = [];
     let delayMs = 0;
 
     function roomFor(name) {
@@ -87,6 +88,9 @@ function createBus() {
                 send(args) {
                     const event = args && args.event;
                     const payload = args && args.payload;
+                    if (blocked.some((block) => block.win === win && block.event === event)) {
+                        return Promise.resolve('ok');
+                    }
                     for (const other of room.channels) {
                         const fn = other.broadcastHandlers[event];
                         if (!fn) continue;
@@ -127,6 +131,31 @@ function createBus() {
                 room.presence.delete(entry.key);
             }
             for (const entry of room.channels) entry.win.setTimeout(() => entry.emit(), 0);
+        },
+        dropPresence(roomCode, pred) {
+            const room = rooms.get('room:' + roomCode);
+            if (!room) throw new Error('no room ' + roomCode);
+            const dropped = [];
+            for (const entry of [...room.channels]) {
+                if (!entry.lastPayload || !pred(entry.lastPayload)) continue;
+                room.channels.delete(entry);
+                room.presence.delete(entry.key);
+                dropped.push(entry);
+            }
+            for (const entry of room.channels) entry.win.setTimeout(() => entry.emit(), 0);
+            return dropped;
+        },
+        restorePresence(roomCode, entries) {
+            const room = rooms.get('room:' + roomCode);
+            if (!room) throw new Error('no room ' + roomCode);
+            for (const entry of entries) {
+                room.channels.add(entry);
+                if (entry.lastPayload) room.presence.set(entry.key, entry.lastPayload);
+            }
+            for (const entry of room.channels) entry.win.setTimeout(() => entry.emit(), 0);
+        },
+        blockSend(win, event) {
+            blocked.push({ win, event });
         }
     };
 }
@@ -166,7 +195,7 @@ function installClock(window) {
     };
 }
 
-function installPage(window, bus) {
+function installPage(window, bus, sessionEntries) {
     installClock(window);
     window.matchMedia = (query) => ({
         matches: String(query).includes('reduce'),
@@ -197,6 +226,11 @@ function installPage(window, bus) {
         errors.push(event.message || String(event.error));
     });
     window.__errors = errors;
+    if (sessionEntries) {
+        for (const [key, value] of Object.entries(sessionEntries)) {
+            window.sessionStorage.setItem(key, value);
+        }
+    }
     for (const source of SCRIPTS) {
         const script = window.document.createElement('script');
         script.textContent = source;
@@ -204,14 +238,28 @@ function installPage(window, bus) {
     }
 }
 
-function bootDom(bus) {
+function bootDom(bus, sessionEntries) {
     const dom = new JSDOM(HTML, {
         url: 'http://localhost/index.html',
         runScripts: 'dangerously',
         pretendToBeVisual: true
     });
-    installPage(dom.window, bus);
+    installPage(dom.window, bus, sessionEntries);
     return dom;
+}
+
+function copySession(win) {
+    const entries = {};
+    for (let i = 0; i < win.sessionStorage.length; i++) {
+        const key = win.sessionStorage.key(i);
+        entries[key] = win.sessionStorage.getItem(key);
+    }
+    return entries;
+}
+
+function boardWord(win, start) {
+    const tiles = [...win.document.querySelectorAll('.tile')].map((tile) => tile.textContent.trim());
+    return tiles.slice(start, start + 4).join('');
 }
 
 async function pump(windows, ms) {
@@ -516,4 +564,130 @@ test('a locked word still scores if the host drops first', { skip: JSDOM ? false
 
 test('a second player cannot take a name already in the room', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
     await sameNameIsRejected();
+});
+
+async function startRound(room) {
+    const readyOnStandings = active(room.host, 'screen-results') || active(room.host, 'screen-standings');
+    const guestButton = readyOnStandings ? 'btn-standings-ready' : 'btn-ready-up';
+    const hostButton = readyOnStandings ? 'btn-standings-ready' : 'btn-ready-up';
+    room.guest.document.getElementById(guestButton).click();
+    await pump(room.windows, 200);
+    room.host.document.getElementById(hostButton).click();
+    await waitFor(room.windows, () => active(room.host, 'screen-countdown'), 4000, 'countdown');
+    await waitFor(
+        room.windows,
+        () => !active(room.host, 'screen-countdown')
+            && !active(room.guest, 'screen-countdown')
+            && boardWord(room.host, 0).length === 4
+            && boardWord(room.guest, 0).length === 4,
+        8000,
+        'round clock'
+    );
+}
+
+async function earlyLockLeavesTheGuestTheirClock() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        await startRound(room);
+        const guestWord = boardWord(room.guest, 0);
+        submitWord(room.guest, guestWord);
+        await pump(room.windows, 200);
+        await pump(room.windows, 20000);
+        room.host.document.getElementById('submit-round').click();
+        await pump(room.windows, 12000);
+        const guestClock = text(room.guest, 'master-timer');
+        assert(!active(room.host, 'screen-results'), 'host lock-in ended the round 10s later while the guest clock still showed ' + guestClock);
+        assert(guestClock !== '00:00' && !active(room.guest, 'screen-results'), 'guest clock was already done, saw ' + guestClock);
+
+        bus.blockSend(room.guest, 'submit_words');
+        await pump(room.windows, 70000);
+        await waitFor(room.windows, () => active(room.host, 'screen-results'), 5000, 'results after the round deadline');
+        const guestTotal = text(room.guest, 'total-score-display');
+        const results = text(room.host, 'results-list');
+        assert(results.includes(guestWord), 'guest word ' + guestWord + ' was missing from results: ' + results);
+        assert(guestTotal === 'Total: 4 pts', 'guest score after the deadline was ' + JSON.stringify(guestTotal));
+        console.log('PASS early lock waits for the round');
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+async function reconnectKeepsWordsFoundAfterTheDrop() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        await startRound(room);
+        const first = boardWord(room.guest, 0);
+        const second = boardWord(room.guest, 4);
+        assert(first !== second && first.length === 4 && second.length === 4, 'board did not yield two words, saw ' + JSON.stringify([first, second, [...room.guest.document.querySelectorAll('.tile')].map((tile) => tile.textContent.trim()).join('')]));
+        submitWord(room.guest, first);
+        await pump(room.windows, 200);
+        const dropped = bus.dropPresence(room.code, (payload) => payload.name === 'Bea');
+        await pump(room.windows, 400);
+        bus.restorePresence(room.code, dropped);
+        await pump(room.windows, 400);
+        assert(!active(room.host, 'screen-results'), 'the round ended when Bea reconnected');
+        submitWord(room.guest, second);
+        await pump(room.windows, 200);
+        room.guest.document.getElementById('submit-round').click();
+        room.host.document.getElementById('submit-round').click();
+        await pump(room.windows, 800);
+        const guestTotal = text(room.guest, 'total-score-display');
+        const results = text(room.host, 'results-list');
+        assert(results.includes(first) && results.includes(second), 'results dropped a word found around the disconnect: ' + results);
+        assert(guestTotal === 'Total: 8 pts', 'guest score after reconnect was ' + JSON.stringify(guestTotal));
+        console.log('PASS reconnect keeps both words');
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+async function refreshDuringCountdownKeepsTheRoundLength() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    let refreshed = null;
+    try {
+        await startRound(room);
+        await pump(room.windows, 61000);
+        await waitFor(room.windows, () => active(room.host, 'screen-results'), 15000, 'round 1 expired');
+        room.guest.document.getElementById('btn-standings-ready').click();
+        await pump(room.windows, 200);
+        room.host.document.getElementById('btn-standings-ready').click();
+        await waitFor(room.windows, () => active(room.host, 'screen-countdown'), 4000, 'round 2 countdown');
+        await pump(room.windows, 1000);
+        const saved = copySession(room.host);
+        assert(saved.wordperfect_is_playing === 'true' && saved.wordperfect_time_left === '0', 'countdown session time_left was ' + JSON.stringify(saved.wordperfect_time_left) + ' playing=' + saved.wordperfect_is_playing);
+        bus.disconnectWhere(room.code, (payload) => payload.name === 'Bea');
+        await pump(room.windows, 200);
+        const refreshedDom = bootDom(bus, saved);
+        refreshed = refreshedDom.window;
+        const windows = [...room.windows, refreshed];
+        await waitFor(windows, () => !active(refreshed, 'screen-boot'), 4000, 'refreshed guest leaves boot');
+        await pump(windows, 2500);
+        const clock = text(refreshed, 'master-timer');
+        const button = text(refreshed, 'submit-round');
+        assert(button !== 'Calculating...' && clock !== '00:00' && !active(refreshed, 'screen-results'), 'refresh during countdown started a 0-second round, clock=' + clock + ' button=' + JSON.stringify(button));
+        console.log('PASS countdown refresh keeps the round', clock);
+        refreshedDom.window.close();
+        refreshed = null;
+    } finally {
+        if (refreshed) refreshed.close();
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+test('an early host lock-in does not end the round 10 seconds later', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+    await earlyLockLeavesTheGuestTheirClock();
+});
+
+test('a guest who drops and returns can still score words found after the drop', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+    await reconnectKeepsWordsFoundAfterTheDrop();
+});
+
+test('a refresh during the next countdown does not start a 0-second round', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+    await refreshDuringCountdownKeepsTheRoundLength();
 });
