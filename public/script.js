@@ -57,6 +57,8 @@ let myPlayerName = '';
 // Host-specific memory for collision checking
 let hostSubmissions = {};
 let hostFilledSubmissionIds = new Set();
+let lastResultsPayload = null;
+let lastScoredRound = null;
 let roundFinalized = false;
 let finalizeWatchdog = null;
 let activePlayersList = []; // Kept in sync via presence
@@ -288,6 +290,7 @@ const wordInput = document.getElementById('word-input');
 const sendBtn = document.getElementById('send-word-btn');
 const draftList = document.getElementById('drafted-words');
 const actionBtn = document.getElementById('submit-round');
+const ACTION_LABEL = actionBtn ? actionBtn.textContent : 'Lock In Early';
 
 const roundIndicator = document.getElementById('round-indicator');
 const totalScoreDisplay = document.getElementById('total-score-display');
@@ -511,6 +514,7 @@ async function loadDictionaryText() {
 async function bootEngine() {
     const bootLoading = document.getElementById('boot-loading');
     startBootTips();
+    loadMatterScript().catch(() => {});
     try {
         const text = await loadDictionaryText();
         const words = text.split(/\r?\n/).filter(word => word.trim().length > 0);
@@ -941,6 +945,7 @@ function dismissConnectionLoss() {
 function resumeRoundClock() {
     if (!clockPausedByConnection) return;
     if (!isPlaying || timeLeft <= 0) return;
+    roundEndsAt = null;
     clockPausedByConnection = false;
     startClock();
 }
@@ -1103,12 +1108,7 @@ async function maybeElectNewHost() {
 
         clearTimeout(finalizeWatchdog);
         if (WordperfectRoundSync.shouldArmTakeoverWatchdog(isPlaying, timeLeft, roundScored)) {
-            finalizeWatchdog = setTimeout(() => {
-                if (isHost && !roundFinalized) {
-                    console.warn('Finalize watchdog fired after host takeover.');
-                    finalizeRound();
-                }
-            }, 10000);
+            armFinalizeWatchdog();
         }
     } finally {
         hostElectionInProgress = false;
@@ -1184,15 +1184,24 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             }
         }
 
-        const anotherHost = livePresencePlayers.find(
+        const otherHosts = livePresencePlayers.filter(
             player => player.isHost && !player.isAi && player.id !== myPlayerId
         );
-        if (isHost && recoveringAsFormerHost && anotherHost) {
+        const myGen = Number(hostGeneration) || 0;
+        const outranked = otherHosts.some(player => {
+            const generation = Number(player.hostGeneration) || 0;
+            return generation > myGen || (generation === myGen && String(player.id) < String(myPlayerId));
+        });
+        if (isHost && (outranked || (recoveringAsFormerHost && otherHosts.length > 0))) {
             isHost = false;
             disconnectedSeats = [];
+            myLocalAiPlayers = [];
+            clearTimeout(finalizeWatchdog);
+            finalizeWatchdog = null;
             sessionStorage.setItem('wordperfect_is_host', 'false');
             const myLiveState = livePresencePlayers.find(player => player.id === myPlayerId);
             if (myLiveState) myLiveState.isHost = false;
+            resetReadyButtons();
             syncMyState();
         }
         const liveIds = new Set(livePresencePlayers.map(player => player.id));
@@ -1299,6 +1308,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             if (reclaimRequestPending) {
                 // The host may publish the seat removal before our targeted grant arrives.
                 // Keep waiting rather than turning that harmless ordering race into a denial.
+            } else if (claimableSeat && claimableSeat.id === myPlayerId) {
+                confirmRoomExists();
             } else if (claimableSeat) {
                 reclaimRequestPending = true;
                 showJoinStatus('Reclaiming your seat…', false);
@@ -1376,6 +1387,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             event: 'claim_granted',
             payload: hostPayload({ requesterId: data.requesterId, seat, isPlaying })
         });
+        WordperfectIntegrity.releaseHostFilledSubmission(hostSubmissions, hostFilledSubmissionIds, seat.id);
         disconnectedSeats = disconnectedSeats.filter(item => item.id !== seat.id);
         lastKnownDisconnectedSeats = disconnectedSeats.map(item => ({ ...item }));
         scheduleDisconnectedSeatCleanup();
@@ -1478,6 +1490,12 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
                     timeLeft: timeLeft
                 })
             });
+        } else if (isHost && lastResultsPayload) {
+            await roomChannel.send({
+                type: 'broadcast',
+                event: 'round_results',
+                payload: hostPayload({ ...lastResultsPayload, resend: true })
+            });
         }
     });
 
@@ -1569,6 +1587,8 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
             console.warn('Ignoring round_results from non-host or malformed payload');
             return;
         }
+        if (data.resend && roundScored && lastScoredRound === data.currentRound) return;
+        lastScoredRound = data.currentRound;
 
         dropPausedClock();
         isPlaying = false;
@@ -1713,6 +1733,12 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
         wordAttempts = 0;
         wordErrors = 0;
         isReady = false;
+        lastResultsPayload = null;
+        lastScoredRound = null;
+        if (isHost) {
+            disconnectedSeats = [];
+            lastKnownDisconnectedSeats = [];
+        }
         // Bots now carry their score between rounds, so a new game has to clear it too
         myLocalAiPlayers = myLocalAiPlayers.map(bot => ({
             ...bot, score: 0, totalWords: 0, updatedAt: Date.now()
@@ -1731,7 +1757,7 @@ async function joinRealtimeRoom(code, name, hostFlag, isRecovery = false) {
 
         await syncMyState();
 
-        hideOverlay(screenWinner);
+        [screenLobby, screenResults, screenStandings, screenWinner].forEach(hideOverlay);
         showOverlay(screenLobby);
     });
 
@@ -1834,6 +1860,7 @@ async function startGameAsHost() {
     if (isPlaying || !roomChannel) return;
     isPlaying = true;
     appliedStartId = makeStartId();
+    lastResultsPayload = null;
     timeLeft = WordperfectRoundSync.roundStartTimeLeft(secondsPerRound);
     resetHostSubmissions();
     roundFinalized = false;
@@ -2101,15 +2128,16 @@ async function calculateScoresAndBroadcast() {
     saveGameStateToSession();
     if (isHost) await syncMyState();
 
+    lastResultsPayload = {
+        results,
+        players: tempPlayers,
+        isGameOver: isGameOver,
+        currentRound: currentRound
+    };
     await roomChannel.send({
         type: 'broadcast',
         event: 'round_results',
-        payload: hostPayload({
-            results,
-            players: tempPlayers,
-            isGameOver: isGameOver,
-            currentRound: currentRound
-        })
+        payload: hostPayload(lastResultsPayload)
     });
 }
 
@@ -2250,6 +2278,8 @@ async function leaveRoomAndGoHome() {
     reconnectInProgress = false;
     clockPausedByConnection = false;
     recoveringAsFormerHost = false;
+    lastResultsPayload = null;
+    lastScoredRound = null;
     aiEnabled = true;
     isReady = false;
     isHost = false;
@@ -2512,6 +2542,8 @@ function resetReadyButtons() {
     btnReadyUp.textContent = lobbyReadyLabel();
     btnStandingsReady.style.backgroundColor = 'var(--primary)';
     btnStandingsReady.textContent = 'Ready for Next Round';
+    if (btnPlayAgain) btnPlayAgain.classList.toggle('hidden', !isHost);
+    if (guestWaitingMsg) guestWaitingMsg.classList.toggle('hidden', isHost);
 }
 
 function updateLobbyRoundText() {
@@ -2938,6 +2970,7 @@ function startCountdown() {
     // Held at module scope so leaving the room can cancel a countdown in flight —
     // otherwise it fires initRound() on a player who has already gone home.
     clearInterval(countdownInterval);
+    [screenLobby, screenResults, screenStandings, screenWinner].forEach(hideOverlay);
 
     document.body.classList.add('counting-down');
     if (countdownRound) countdownRound.textContent = `ROUND ${currentRound} OF ${maxRounds}`;
@@ -3270,28 +3303,8 @@ function initRound(syncedTime = null) {
     roundScoreDisplay.textContent = `Drafted: ${draftedWords.length} words`;
     btnShuffle.disabled = false;
     updateLobbyRoundText();
-
-    // Populate with cached words staggered vertically
-    if (draftedWords.length > 0) {
-        if (typeof Matter !== 'undefined' && physicsWorld) {
-            for (let i = draftedWords.length - 1; i >= 0; i--) {
-                const staggerIndex = (draftedWords.length - 1) - i;
-                addWordToPhysics(draftedWords[i], staggerIndex);
-            }
-        } else {
-            const fallbackList = document.getElementById('drafted-words');
-            if (fallbackList) {
-                fallbackList.innerHTML = '';
-                for (let i = draftedWords.length - 1; i >= 0; i--) {
-                    const li = document.createElement('li');
-                    li.className = 'draft-item body-strong';
-                    li.textContent = draftedWords[i];
-                    li.dataset.word = draftedWords[i];
-                    fallbackList.prepend(li);
-                }
-            }
-        }
-    }
+    renderDraftedWords();
+    if (actionBtn) actionBtn.textContent = ACTION_LABEL;
 
     wordInput.disabled = false;
     wordInput.value = '';
@@ -3321,12 +3334,28 @@ function startClock() {
 
     paintClock(); // show the full starting second immediately (no off-by-one first paint)
     timerInterval = setInterval(() => {
-        timeLeft--;
+        timeLeft = Math.max(0, Math.ceil((roundEndsAt - Date.now()) / 1000));
         paintClock();
         if (timeLeft <= 0) {
             endRound();
         }
     }, 1000);
+}
+
+function renderDraftedWords() {
+    const oldestFirst = draftedWords.slice().reverse();
+    if (typeof Matter !== 'undefined' && physicsWorld) {
+        oldestFirst.forEach((word, index) => addWordToPhysics(word, index));
+    } else if (draftList) {
+        draftList.innerHTML = '';
+        oldestFirst.forEach(word => {
+            const li = document.createElement('li');
+            li.className = 'draft-item body-strong';
+            li.textContent = word;
+            li.dataset.word = word;
+            draftList.prepend(li);
+        });
+    }
 }
 
 async function endRound() {
@@ -3378,21 +3407,23 @@ async function endRound() {
 
     // Safety net: a client that freezes (backgrounded mobile tab) keeps its presence but
     // never reports, so presence changes alone can't rescue the round. Close it anyway.
-    if (isHost) {
-        clearTimeout(finalizeWatchdog);
-        const graceMs = WordperfectRoundSync.graceUntilRoundEnd(roundEndsAt, Date.now(), 10000);
-        finalizeWatchdog = setTimeout(() => {
-            if (!isHost || roundFinalized) return;
-            console.warn("Finalize watchdog fired - closing round without every submission.");
-            WordperfectIntegrity.fillUnsubmittedFromSnapshots(
-                hostSubmissions,
-                activePlayersList.filter(player => !player.isAi),
-                draftSnapshots,
-                currentRound
-            );
-            finalizeRound();
-        }, graceMs);
-    }
+    if (isHost) armFinalizeWatchdog();
+}
+
+function armFinalizeWatchdog() {
+    clearTimeout(finalizeWatchdog);
+    const graceMs = WordperfectRoundSync.graceUntilRoundEnd(roundEndsAt, Date.now(), 10000);
+    finalizeWatchdog = setTimeout(() => {
+        if (!isHost || roundFinalized) return;
+        console.warn('Finalize watchdog fired - closing round without every submission.');
+        WordperfectIntegrity.fillUnsubmittedFromSnapshots(
+            hostSubmissions,
+            activePlayersList.filter(player => !player.isAi),
+            draftSnapshots,
+            currentRound
+        );
+        finalizeRound();
+    }, graceMs);
 }
 
 function resetHostSubmissions() {
@@ -3739,7 +3770,10 @@ function loadMatterScript() {
 // --- PHYSICS ENGINE INTEGRATION ---
 function initPhysics() {
     if (typeof Matter === 'undefined') {
-        loadMatterScript().then(() => initPhysics()).catch((err) => {
+        loadMatterScript().then(() => {
+            initPhysics();
+            renderDraftedWords();
+        }).catch((err) => {
             console.error(err);
         });
         return;

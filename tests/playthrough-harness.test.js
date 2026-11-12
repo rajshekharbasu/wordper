@@ -160,7 +160,12 @@ function createBus() {
     };
 }
 
+const virtualOrigin = Date.now();
+let virtualNow = 0;
+const virtualDateNow = () => virtualOrigin + virtualNow;
+
 function installClock(window) {
+    window.Date.now = virtualDateNow;
     let now = 0;
     let seq = 1;
     const timers = [];
@@ -267,6 +272,7 @@ async function pump(windows, ms) {
     let left = ms;
     while (left > 0) {
         const slice = Math.min(step, left);
+        virtualNow += slice;
         for (const win of windows) win.__flush(slice);
         left -= slice;
         for (let i = 0; i < 30; i++) await Promise.resolve();
@@ -299,6 +305,17 @@ function assert(condition, message) {
         error.failure = message;
         throw error;
     }
+}
+
+// Every window shares one Date, and the round clock reads Date.now(). Tests that
+// pump that clock have to take turns or one room's flush moves the other's deadline.
+let serialGate = Promise.resolve();
+function serialTest(name, fn) {
+    test(name, { skip: JSDOM ? false : 'jsdom is not installed' }, () => {
+        const run = serialGate.then(fn);
+        serialGate = run.then(() => {}, () => {});
+        return run;
+    });
 }
 
 async function playRound(windows, host, guest) {
@@ -500,7 +517,7 @@ async function hostLeavesAfterAScoredRound() {
     }
 }
 
-test('a slow host presence still joins, and round points carry', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+serialTest('a slow host presence still joins, and round points carry', async () => {
     await main();
 });
 
@@ -554,15 +571,15 @@ async function sameNameIsRejected() {
     }
 }
 
-test('points survive the host dropping', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+serialTest('points survive the host dropping', async () => {
     await hostLeavesAfterAScoredRound();
 });
 
-test('a locked word still scores if the host drops first', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+serialTest('a locked word still scores if the host drops first', async () => {
     await lockedWordSurvivesMidRoundHostDrop();
 });
 
-test('a second player cannot take a name already in the room', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+serialTest('a second player cannot take a name already in the room', async () => {
     await sameNameIsRejected();
 });
 
@@ -679,14 +696,166 @@ async function refreshDuringCountdownKeepsTheRoundLength() {
     }
 }
 
-test('an early host lock-in does not end the round 10 seconds later', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+serialTest('an early host lock-in does not end the round 10 seconds later', async () => {
     await earlyLockLeavesTheGuestTheirClock();
 });
 
-test('a guest who drops and returns can still score words found after the drop', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+serialTest('a guest who drops and returns can still score words found after the drop', async () => {
     await reconnectKeepsWordsFoundAfterTheDrop();
 });
 
-test('a refresh during the next countdown does not start a 0-second round', { skip: JSDOM ? false : 'jsdom is not installed' }, async () => {
+serialTest('a refresh during the next countdown does not start a 0-second round', async () => {
     await refreshDuringCountdownKeepsTheRoundLength();
+});
+
+function screenList(win) {
+    return ['screen-boot', 'screen-lobby', 'screen-countdown', 'screen-results', 'screen-standings', 'screen-winner']
+        .filter((id) => active(win, id))
+        .join(',');
+}
+
+async function refreshBetweenRoundsRestoresResults() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    let refreshed = null;
+    try {
+        const played = await playRound(room.windows, room.host, room.guest);
+        await waitFor(room.windows, () => active(room.host, 'screen-results'), 2000, 'results before refresh');
+        const saved = copySession(room.guest);
+        bus.disconnectWhere(room.code, (payload) => payload.name === 'Bea');
+        await pump(room.windows, 400);
+        const refreshedDom = bootDom(bus, saved);
+        refreshed = refreshedDom.window;
+        const windows = [room.host, refreshed];
+        await waitFor(windows, () => !active(refreshed, 'screen-boot'), 4000, 'refreshed guest leaves boot');
+        await pump(windows, 1500);
+        const status = text(refreshed, 'join-error-msg');
+        assert(!/no longer available/i.test(status), 'refresh between rounds rejected the seat: ' + JSON.stringify(status));
+        assert(active(refreshed, 'screen-results'), 'missed results were not restored, screens=' + screenList(refreshed) + ' status=' + JSON.stringify(status));
+        assert(text(refreshed, 'results-list').includes(played.guestWord), 'restored results omitted ' + played.guestWord);
+        console.log('PASS refresh between rounds restores results');
+        refreshedDom.window.close();
+        refreshed = null;
+    } finally {
+        if (refreshed) refreshed.close();
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+async function aReturnedHostStepsDown() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        const dropped = bus.dropPresence(room.code, (payload) => payload.isHost);
+        await pump(room.windows, 800);
+        assert(text(room.guest, 'btn-ready-up') === 'Start Game', 'guest did not take over, button=' + JSON.stringify(text(room.guest, 'btn-ready-up')));
+        bus.restorePresence(room.code, dropped);
+        await pump(room.windows, 800);
+        const hostLabel = text(room.host, 'btn-ready-up');
+        const guestLabel = text(room.guest, 'btn-ready-up');
+        assert(guestLabel === 'Start Game', 'the new host gave the room back, guest=' + JSON.stringify(guestLabel));
+        assert(hostLabel === 'Ready to Play', 'the original host stayed host, host=' + JSON.stringify(hostLabel));
+        console.log('PASS returned host steps down');
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+async function nextRoundClearsTheRoundScreens() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        await playRound(room.windows, room.host, room.guest);
+        await waitFor(room.windows, () => active(room.host, 'screen-results'), 2000, 'results before the next round');
+        assert(text(room.host, 'submit-round') === 'Calculating...', 'lock-in label was not calculating after the round');
+        room.guest.document.getElementById('btn-standings-ready').click();
+        await pump(room.windows, 200);
+        room.host.document.getElementById('btn-standings-ready').click();
+        await waitFor(room.windows, () => active(room.host, 'screen-countdown') && active(room.guest, 'screen-countdown'), 4000, 'next countdown');
+        assert(!active(room.host, 'screen-results') && !active(room.guest, 'screen-results'), 'countdown started under the results screen, host=' + screenList(room.host) + ' guest=' + screenList(room.guest));
+        await waitFor(room.windows, () => {
+            const clocks = [text(room.host, 'master-timer'), text(room.guest, 'master-timer')];
+            return clocks.every((clock) => clock === '01:00' || clock === '00:59');
+        }, 8000, 'next round clock');
+        assert(text(room.host, 'submit-round') === 'Lock In Early', 'lock-in label stayed ' + JSON.stringify(text(room.host, 'submit-round')));
+        assert(text(room.guest, 'submit-round') === 'Lock In Early', 'guest lock-in label stayed ' + JSON.stringify(text(room.guest, 'submit-round')));
+        console.log('PASS next round clears results and the lock-in label');
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+async function newHostCanPlayAgain() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        const rounds = room.host.document.getElementById('lobby-input-rounds');
+        rounds.value = '1';
+        rounds.dispatchEvent(new room.host.Event('input', { bubbles: true }));
+        rounds.dispatchEvent(new room.host.Event('change', { bubbles: true }));
+        await pump(room.windows, 300);
+        await playRound(room.windows, room.host, room.guest);
+        await waitFor(room.windows, () => text(room.guest, 'btn-next-round') === 'View Final Standings', 2000, 'final results');
+        room.guest.document.getElementById('btn-next-round').click();
+        await pump(room.windows, 300);
+        assert(active(room.guest, 'screen-winner'), 'guest never reached the winner screen, screens=' + screenList(room.guest));
+        assert(room.guest.document.getElementById('btn-play-again').classList.contains('hidden'), 'guest saw Play Again before taking over');
+        bus.disconnectWhere(room.code, (payload) => payload.isHost);
+        await pump(room.windows, 800);
+        assert(!room.guest.document.getElementById('btn-play-again').classList.contains('hidden'), 'the new host still saw waiting for host');
+        console.log('PASS new host can play again');
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+async function matterLoadRedrawsDrafts() {
+    const bus = createBus();
+    const room = await bootPair(bus);
+    try {
+        await startRound(room);
+        const word = boardWord(room.guest, 0);
+        submitWord(room.guest, word);
+        await pump(room.windows, 200);
+        assert(text(room.guest, 'drafted-words').includes(word), 'draft list never showed ' + word);
+        room.guest.innerWidth = 400;
+        room.guest.Matter = {
+            Engine: { create() { return { world: {} }; }, clear() {} },
+            World: { clear() {}, add() {} },
+            Bodies: { rectangle() { return {}; } }
+        };
+        const pending = [...room.guest.document.scripts].find((script) => String(script.src).includes('matter'));
+        if (pending && typeof pending.onload === 'function') pending.onload();
+        else room.guest.initPhysics();
+        await pump(room.windows, 50);
+        assert(text(room.guest, 'drafted-words').includes(word), 'loading Matter cleared drafted word ' + word);
+        console.log('PASS matter reload keeps drafted words');
+    } finally {
+        room.hostDom.window.close();
+        room.guestDom.window.close();
+    }
+}
+
+serialTest('a refresh on the results screen stays in the room and sees the results', async () => {
+    await refreshBetweenRoundsRestoresResults();
+});
+
+serialTest('a host that reconnects steps down when a newer host is live', async () => {
+    await aReturnedHostStepsDown();
+});
+
+serialTest('the next round hides results and restores the lock-in label', async () => {
+    await nextRoundClearsTheRoundScreens();
+});
+
+serialTest('the new host can play again from the winner screen', async () => {
+    await newHostCanPlayAgain();
+});
+
+serialTest('drafted words stay visible after Matter loads on a narrow screen', async () => {
+    await matterLoadRedrawsDrafts();
 });
